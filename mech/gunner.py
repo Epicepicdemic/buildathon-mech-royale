@@ -11,7 +11,10 @@ import math
 import random
 
 from . import ballistics as bal
+from . import profile as PF
 from .geom import wrap, angdiff, clamp
+
+GUN_AIM_UNTIL = 0.45        # gun_during_charge: the torso follows the gun's lead below this share
 
 
 class Target:
@@ -115,6 +118,18 @@ class Gunner:
         return True
 
     # ------------------------------------------------------------------ main
+    def laser_damage(self, me, laser):
+        """Damage of a release now: 35% at the 0.15 s minimum, rising linearly to full at the
+        0.75 s charge, times our cube multiplier."""
+        from .doctrine import cube_mult
+        full = laser.stat("charge", 0.75)
+        lo = laser.stat("min_charge", 0.15)
+        if laser.charge < lo:
+            return 0.0
+        mf = laser.stat("min_frac", 0.35)
+        frac = mf + (1.0 - mf) * min(1.0, (laser.charge - lo) / max(full - lo, 1e-6))
+        return laser.stat("damage", 315.0) * frac * cube_mult(me.cubes, self.cfg)
+
     def control(self, me, intent, tgt, obstacles=(), face_yaw=None, move_yaw=None, events=()):
         """Returns (aim [yaw, pitch], fire [b0, b1], reload bool, info dict)."""
         t = me.t
@@ -144,10 +159,17 @@ class Gunner:
             cdist = math.dist(me.muzzle, tgt.center())
             # --- laser takes the aim while charging (hitscan: aim straight at it)
             laser_active = laser is not None and laser.charge > 0
+            gun_sol = None
             if laser_active:
                 yaw, pitch, aimp = self._direct_aim(me, tgt, latency=self.dt)
-                aim = [yaw, pitch]
                 full = laser.stat("charge", 0.75)
+                if gun is not None and PF.on("gun_during_charge"):
+                    # both slots fire on their own aim test (recon/rea-mech-royale.md P2): the torso
+                    # follows the gun's lead until the charge passes 45%, then the laser's line
+                    gun_sol = self._gun_aim(me, tgt, gun)
+                    aim = [gun_sol[0], gun_sol[1]] if laser.charge < GUN_AIM_UNTIL * full else [yaw, pitch]
+                else:
+                    aim = [yaw, pitch]
                 sy, sp = self._slewed(me, yaw, pitch, 0.05)
                 on = bal.on_target(sy, sp, yaw, pitch, cdist, tgt.radius, tgt.height / 2, 0.7)
                 clear = tgt.visible and self._clear_line(me, aimp)
@@ -160,6 +182,10 @@ class Gunner:
                 if not release and laser.charge >= 0.40 * full and on and clear \
                         and (no_laser_start or (dist > 140 and tgt.track is not None and not tgt.track.los)):
                     release = True
+                if not release and on and clear and PF.on("partial_release") and tgt.track is not None \
+                        and tgt.track.hp is not None and 0.7 * self.laser_damage(me, laser) >= tgt.track.hp \
+                        and (gun_sol is None or laser.charge >= GUN_AIM_UNTIL * full):
+                    release = True                  # a partial charge already kills it (once on its line)
                 fire[laser.slot] = not release
                 if release:
                     self.laser_hold_since = None
@@ -178,8 +204,12 @@ class Gunner:
             info["on"] = on
             info["clear"] = clear
             # --- gun
-            if gun is not None and not laser_active:
+            if gun is not None and (not laser_active or gun_sol is not None):
                 g_ok = gun.reload <= 0 and (gun.ammo is None or gun.ammo > 0) and cdist <= gun.stat("range", 230.0) * 0.99
+                if gun_sol is not None:
+                    # the gun's own test while the laser charges: the torso within tolerance of the lead
+                    gsy, gsp = self._slewed(me, aim[0], aim[1], 0.05)
+                    on = bal.on_target(gsy, gsp, gun_sol[0], gun_sol[1], cdist, tgt.radius, tgt.height / 2, 0.78)
                 if g_ok and on and clear:
                     rr = bal.reversal_range(gun.stat("speed", 252.0))
                     tr = tgt.track

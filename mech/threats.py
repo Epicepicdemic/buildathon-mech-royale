@@ -17,7 +17,7 @@ class Track:
     __slots__ = ("id", "kind", "pos", "vel", "yaw", "pitch", "hp", "max_hp", "cubes", "weapons", "charging",
                  "t_seen", "t_first", "in_obs", "los", "sees_us", "dead", "phantom", "hist", "dmg_to_us",
                  "t_hit_us", "t_we_hit", "dmg_from_us", "t_hp_drop_other", "t_fired_other", "t_heard",
-                 "heard_kind", "home", "aggro", "t_reload_heard", "hp_prev", "t_fired")
+                 "heard_kind", "home", "aggro", "t_reload_heard", "hp_prev", "t_fired", "t_fired_mech")
 
     def __init__(self, tid, kind, t):
         self.id = tid
@@ -50,6 +50,8 @@ class Track:
         self.home = None
         self.aggro = False
         self.t_reload_heard = -1e9
+        self.t_fired_mech = -1e9      # it fired at another mech (a beam ending on one, a shot whose
+                                      # path passes one): only a free-for-all produces this
         self.hp_prev = None
         self.t_fired = -1e9
 
@@ -163,6 +165,8 @@ class Threats:
         self.contacts = []            # SoundContact (unattached mech sounds)
         self.deaths = []              # (t, source) 'kill' | 'sound' | 'alive'
         self.alive = None
+        self.uncredited = 0           # mechs that died without our kill (mech/profile.py)
+        self.kills_at_alive = 0
         self.t = 0.0
         self.kills = 0
         self.last_kill_t = -1e9
@@ -284,6 +288,7 @@ class Threats:
                 n_died = self.alive - alive
                 for _ in range(n_died):
                     self.deaths.append((t, "alive"))
+                self.uncredited += max(0, n_died - (self.kills - self.kills_at_alive))
                 # a wounded mech that vanished from view on the tick someone died is that someone
                 gone = [tr for tr in self.tracks.values() if tr.kind == "mech" and not tr.dead and not tr.in_obs
                         and tr.id in self.prev_in_obs and (tr.hp_frac() < 0.45 or t - tr.t_we_hit <= 2.5)]
@@ -295,6 +300,7 @@ class Threats:
                             (list(tr.est_pos(t)), (tr.cubes or 0) + 2, [w for w in tr.weapons if w != "gun"], t)
                         )
             self.alive = alive
+            self.kills_at_alive = self.kills
         self.prev_in_obs = set(seen_ids)
         # forget stale phantoms and old contacts
         for tid in list(self.tracks):
@@ -392,6 +398,11 @@ class Threats:
             end = path[-1]
             if math.hypot(end[0] - me.pos[0], end[1] - me.pos[1]) > 8.0:
                 tr.t_fired_other = t
+                for o in self.tracks.values():
+                    if o is not tr and o.kind == "mech" and o.in_obs and not o.dead and \
+                            math.hypot(end[0] - o.pos[0], end[1] - o.pos[1]) < 6.0:
+                        tr.t_fired_mech = t
+                        break
         for p in obs.get("projectiles") or []:
             # a projectile whose velocity points well away from us was fired at someone else
             v = p.get("vel") or (0, 0, 0)

@@ -18,6 +18,7 @@ class SingleHunterTests(unittest.TestCase):
         w = world()
         bot = Bot(hello(), world=w)
         bot.tactics.opening_done = True
+        bot.tactics.mode.locked = True      # a free-for-all (squad mode paces a lone hunter: test_profile)
         # strongpoint S1 on the east side of Wilce Health Center; the hunter walks down the open lane
         # to the north, in sight the whole way
         me = (20.0, -85.0)

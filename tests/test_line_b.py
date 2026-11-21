@@ -43,6 +43,7 @@ class LineBCombatAndCanopyTests(unittest.TestCase):
         until LOS is broken and NEVER initiates a suicidal WallHop while seen."""
         w = world()
         bot = Bot(hello(), world=w)
+        bot.tactics.mode.locked = True      # a free-for-all (this pins free-for-all behaviour)
         me = (20.0, -85.0)                      # right beside Wilce Health Center (low roof available)
         ex, ey = 20.0, -42.0                    # 43 m north, healthier enemy with laser
         fired_in_break = False

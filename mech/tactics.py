@@ -16,8 +16,36 @@ from . import positions as P
 from .geom import angdiff, bearing, unit, wrap
 from .gunner import Target
 from .loot import LootMemory
+from . import profile as PF
 
 WANTED_WEAPONS = ("laser", "lightning")     # laser first (kills happen at range), lightning second, never mortar
+LOSE_S = 1.5            # squad_no_break: clearly losing this long before a break stands
+LOSE_NEAR_M = 160.0     # ... counting mechs this close
+GEAR_UNTIL_S = 50.0     # gear_first (mech/profile.py): the opening pacing ends at this time ...
+GEAR_KILLS = 1          # ... or after more kills than this
+GEAR_NEAR_M = 180.0     # a second mech this close: fight (pacing stands aside meanwhile)
+GEAR_MIN_M = 120.0      # keep the lone hunter at least this far ...
+GEAR_MAX_M = 145.0      # ... and never walk toward it from inside this
+GEAR_DEFEND_M = 55.0    # a hunter this close is fought
+GEAR_DEFEND_HP = 0.5    # under this share of HP the pacing ends for good
+GEAR_CUBES = 6          # geared: a laser and this many cubes, or 10 cubes
+GEAR_ROAM_M = 160.0     # remembered crates and drones this close are worth the walk
+CRATE_STALL_M = 12.0    # a crate this close that loses no HP ...
+CRATE_STALL_S = 3.0     # ... for this long while we farm it is left alone ...
+CRATE_STALL_BAN_S = 20.0  # ... this long (point-blank it can sit below our pitch: R12 sandbox
+                        # seeds 8 and 13 stood 160-200 s at a crate 1.4 m away)
+HUNT_AIM_RAD = 0.2      # a mech whose torso stays this close on us ...
+HUNT_AIM_S = 1.0        # ... this long is hunting us (in squad replays the hunter's torso is within
+                        # 0.15 rad of us on 79% of frames, the passive squad members' on 4%) ...
+HUNT_MEMORY_S = 10.0    # ... and counts as hunting this long after (or after it last hit us)
+
+
+class GearHold:
+    """gear_first is on this decision; `hunter` is the nearest mech hunting us, or None."""
+    __slots__ = ("hunter",)
+
+    def __init__(self, hunter):
+        self.hunter = hunter
 
 
 def upgrade_score(me, uid):
@@ -89,11 +117,17 @@ class Tactics:
         self.expose_t = None
         self.expose_hp = None
         self.last_play = None
+        self.mode = PF.ModeDetector()   # squad-practice profile (mech/profile.py)
+        self.losing_since = None        # squad_no_break: when we began clearly losing
+        self.gear_done = False          # gear_first: the opening pacing is over for this match
+        self.aim_since = {}             # mech id -> since when its torso has been on us
+        self.hunter_t = {}              # mech id -> when it last counted as hunting us
         self.play_since = 0.0
         self.healing = False
         self.look_phase = 0.0
         self.rear_flip = 1
         self.crate_ban = {}
+        self.crate_watch = {}           # crate id -> (hp, since, last asked) while close
         self.npc_ban = {}
         self.loot_note = ""
         self.last_harass_hit = -1e9
@@ -135,6 +169,166 @@ class Tactics:
             if best is None or score < best[0]:
                 best = (score, e)
         return best[1] if best else None
+
+    def _losing(self, me, target, enemies):
+        """Clearly losing (recon/rea-mech-royale.md P1): two or more mechs within 160 m and our HP
+        under 55%, three or more and under 80%, or under 35% against a healthier target."""
+        hp = me.hp_frac
+        near = sum(1 for e in enemies if not e.dead and self._dist(me, e) <= LOSE_NEAR_M)
+        if near >= 2 and hp < 0.55:
+            return True
+        if near >= 3 and hp < 0.80:
+            return True
+        return target is not None and hp < 0.35 and target.hp_frac() > hp
+
+    def _lose_rule(self, me, play, target, calc, enemies, sit, corner_ready):
+        """Squad profile: the squad shares vision, so hiding buys nothing. A break stands only once
+        we have been clearly losing for 1.5 s, never while finishing a kill; otherwise fight from
+        the corner if one is ready, else press."""
+        t = me.t
+        if self._losing(me, target, enemies):
+            if self.losing_since is None:
+                self.losing_since = t
+        else:
+            self.losing_since = None
+        if play != D.BREAK or target is None or sit.unseen_hit or calc is None or calc.our_dps <= 1e-6:
+            return play
+        finishing = calc.finishable or target.hp_frac() <= 0.30
+        if not finishing and self.losing_since is not None and t - self.losing_since >= LOSE_S:
+            return play
+        return D.CORNER if corner_ready else D.ASSAULT
+
+    def _geared(self, me):
+        return me.cubes >= 10 or (me.has("laser") and me.cubes >= GEAR_CUBES)
+
+    def _note_hunters(self, me):
+        t = me.t
+        for tr in self.th.mechs():
+            if tr.kind != "mech" or tr.dead or not tr.in_obs:
+                continue
+            if angdiff(tr.yaw, bearing(tr.pos, me.pos)) <= HUNT_AIM_RAD:
+                since = self.aim_since.setdefault(tr.id, t)
+                if t - since >= HUNT_AIM_S:
+                    self.hunter_t[tr.id] = t
+            else:
+                self.aim_since.pop(tr.id, None)
+
+    def _hunting(self, me, tr):
+        t = me.t
+        return t - tr.t_hit_us <= HUNT_MEMORY_S or t - self.hunter_t.get(tr.id, -1e9) <= HUNT_MEMORY_S
+
+    def _gear_hunter(self, me, enemies, squad, unseen_hit=False):
+        """gear_first (round table 12): the practice squad sends one hunter early and more as we thin
+        them out, and the score is 16 - place, so the first kills are taken with a laser and cubes
+        rather than the bare gun. Returns a GearHold (with the nearest hunter, or None) while the
+        pacing is on, else None. A hunter hit us in the last 10 s or held its torso on us for 1 s;
+        the other squad members walk past us without firing and are left alone meanwhile.
+        Never in a free-for-all (squad mode only, mech/profile.py)."""
+        if not (squad and PF.on("gear_first")) or self.gear_done or not enemies:
+            return None
+        if self.th.kills > GEAR_KILLS or me.t >= GEAR_UNTIL_S or me.hp_frac < GEAR_DEFEND_HP \
+                or self._geared(me):
+            self.gear_done = True
+            return None
+        self._note_hunters(me)
+        if unseen_hit:
+            return None                               # hit from out of sight: the ordinary break
+        hunters = sorted((e for e in enemies if not e.dead and not e.phantom and self._hunting(me, e)),
+                         key=lambda e: self._dist(me, e))
+        if sum(1 for e in hunters if self._dist(me, e) <= GEAR_NEAR_M) >= 2:
+            return None
+        h = hunters[0] if hunters else None
+        if h is not None and self._dist(me, h) < GEAR_DEFEND_M:
+            return None
+        for e in enemies:
+            # counter: anything under 55 m with its torso on us is fought at once (no 1 s wait)
+            if not e.dead and not e.phantom and e.in_obs and self._dist(me, e) < GEAR_DEFEND_M \
+                    and angdiff(e.yaw, bearing(e.pos, me.pos)) <= 0.45:
+                return None
+        return GearHold(h)
+
+    def _gear_roam(self, me, allow):
+        """A remembered crate or a drone within 160 m (the loot memory keeps crates out of sight)."""
+        best = None
+        for cp, _, _ in self.loot.crates.values():
+            d = math.hypot(cp[0] - me.pos[0], cp[1] - me.pos[1])
+            if d <= GEAR_ROAM_M and abs(cp[2] - me.pos[2]) <= 4.0 and allow(cp[0], cp[1]) \
+                    and (best is None or d < best[0]):
+                best = (d, (cp[0], cp[1]))
+        for tr in self.th.npcs():
+            p = tr.est_pos(me.t) if hasattr(tr, "est_pos") else tr.pos
+            d = math.hypot(p[0] - me.pos[0], p[1] - me.pos[1])
+            if d <= GEAR_ROAM_M and allow(p[0], p[1]) and (best is None or d + 20.0 < best[0]):
+                best = (d + 20.0, (p[0], p[1]))
+        return best[1] if best else None
+
+    def _gear(self, me, obs, dec, h, slack):
+        """Keep the lone hunter (if any) at 120-145 m without shooting any mech, and loot toward a laser (then
+        lightning) and cubes: weapon pickups (a laser to 240 m), kill drops, cubes, crates, drones.
+        Counter (it closes anyway, or a second one comes): under 55 m, under half HP, a second mech
+        within 180 m, a second kill or 50 s each hand the fight back to the ordinary plays."""
+        t = me.t
+        z = self.zone
+        intent = dec.intent
+        h = h.hunter
+        hp_ = h.est_pos(t) if h is not None else None
+        dh = math.hypot(hp_[0] - me.pos[0], hp_[1] - me.pos[1]) if h is not None else 1e9
+
+        def allow(px, py):
+            if hp_ is None:
+                return True
+            dg = math.hypot(px - hp_[0], py - hp_[1])
+            if dh < GEAR_MIN_M:
+                return dg > dh + 4.0                  # inside the band: only goals that open the range
+            return dg >= GEAR_MIN_M - 10.0 or dg >= dh
+
+        intent.fire = "none"
+        dec.target = None
+        sc = self.shoot_choice(me, obs, allow_npc=True) if slack > 10.0 else None
+        if sc is not None:
+            dec.target = sc                           # crates and drones, never the hunter
+            intent.fire = "long"
+        goal, tag = None, None
+        lc = self.loot_choice(me, obs, far=True, allow=allow) if slack > 13.0 else None
+        if lc is not None:
+            kind, lid, pos, drop, in_reach = lc
+            if kind == "pickup" and in_reach:
+                dec.take = lid
+                dec.drop = drop
+            goal, tag = pos, kind
+        elif sc is not None and sc.kind == "crate" and allow(sc.pos[0], sc.pos[1]):
+            goal, tag = (sc.pos[0], sc.pos[1]), "crate"
+        elif slack > 13.0:
+            g = self._gear_roam(me, allow)
+            if g is not None:
+                goal, tag = g, "roam"
+        if goal is not None:
+            dg = math.hypot(goal[0] - me.pos[0], goal[1] - me.pos[1])
+            if tag == "crate" and dg <= 3.5:
+                self.mv.clear()
+            else:
+                self.mv.go(goal, me, z, prefer_cover=False, tag="gear-" + tag, replan_dist=2.5)
+            dec.speed = "boost" if dg > 16.0 and me.energy > 45.0 else "walk"
+        elif dh < GEAR_MIN_M:
+            kg = self.displacement(me, bearing(me.pos, hp_), dist=14.0, away_only=True)
+            tag = "kite"
+            if kg is not None:
+                self._go_instant_or_plan(kg, me, z, "gear-kite")
+                dec.speed = "boost" if dh < 100.0 and me.energy > 25.0 else "walk"
+            else:
+                self.mv.clear()
+        else:
+            hold = self.hold_spot(me)
+            tag = "hold"
+            if allow(hold[0], hold[1]) and dh > GEAR_MAX_M:
+                self.mv.go(hold, me, z, prefer_cover=True, tag="gear-hold")
+            else:
+                self.mv.clear()
+        if h is not None:
+            dec.evasive = h.los or h.sees_us or t - h.t_hit_us <= 3.0
+            if dec.target is None:
+                dec.face = bearing(me.pos, hp_)       # watch it while we loot
+        intent.label = "gear %s %s" % (tag, "%d" % dh if h is not None else "-")
 
     def _me_weapons(self, me):
         return {w.kind: w.stats for w in me.weapons}
@@ -263,8 +457,10 @@ class Tactics:
         return self.patrol_yaw(me, None)
 
     # ------------------------------------------------------------------ aggressive loot & farming
-    def loot_choice(self, me, obs):
-        """Best weapon pickup, kill drop, or cube from live sight + spatial LootMemory, inside safe zone."""
+    def loot_choice(self, me, obs, far=False, allow=None):
+        """Best weapon pickup, kill drop, or cube from live sight + spatial LootMemory, inside safe zone.
+        `far` (gear_first): a laser to 240 m, lightning to 160 m, cubes to 120 m; `allow(x, y)` vetoes
+        goals (e.g. toward the hunter we keep at range)."""
         z = self.zone
         cx, cy, rs = self.mv.safe_circle(z)
         slack = self.mv.slack(me, z)
@@ -273,6 +469,8 @@ class Tactics:
         best = None
 
         def zone_ok(px, py):
+            if allow is not None and not allow(px, py):
+                return False
             if z.margin_at(px, py, me.t + 2.0) < 0.0 and math.hypot(px - cx, py - cy) > rs:
                 return False
             if slack < 22.0 and math.hypot(px - cx, py - cy) > rs + 8.0:
@@ -296,7 +494,7 @@ class Tactics:
                 else:
                     continue
             d = math.hypot(pp[0] - me.pos[0], pp[1] - me.pos[1])
-            max_d = 145.0 if k == "laser" else 95.0
+            max_d = (240.0 if k == "laser" else 160.0) if far else (145.0 if k == "laser" else 95.0)
             if d > max_d or abs(pp[2] - me.pos[2]) > 6.5 or not zone_ok(pp[0], pp[1]):
                 continue
             d_eff = d * (0.38 if k == "laser" else 0.72)
@@ -309,7 +507,7 @@ class Tactics:
         for idx, (kp, kcubes, kwpns, _) in enumerate(self.loot.kill_drops):
             d = math.hypot(kp[0] - me.pos[0], kp[1] - me.pos[1])
             has_wanted = any(w in WANTED_WEAPONS and w not in kinds for w in kwpns)
-            max_d = 135.0 if has_wanted else 105.0
+            max_d = (135.0 if has_wanted else 105.0) + (40.0 if far else 0.0)
             if d > max_d or abs(kp[2] - me.pos[2]) > 6.5 or not zone_ok(kp[0], kp[1]):
                 continue
             val = min(kcubes, 6) * 8.0 + (35.0 if has_wanted else 0.0)
@@ -321,7 +519,7 @@ class Tactics:
         cube_items = list(self.loot.cubes.items())
         for cid, (cp, _) in cube_items:
             d = math.hypot(cp[0] - me.pos[0], cp[1] - me.pos[1])
-            max_d = 90.0 if me.cubes < 10 else 55.0
+            max_d = (120.0 if far else 90.0) if me.cubes < 10 else 55.0
             if d > max_d or abs(cp[2] - me.pos[2]) > 4.0 or not zone_ok(cp[0], cp[1]):
                 continue
             # Cluster bonus when multiple cubes lie together (e.g. visible kill pile or drone drop)
@@ -342,9 +540,20 @@ class Tactics:
         best = None
         for c in obs.get("crates") or []:
             cp = c.get("pos")
-            if self.crate_ban.get(c["id"], -1e9) > t:
+            cid = c["id"]
+            if self.crate_ban.get(cid, -1e9) > t:
                 continue
             d = math.hypot(cp[0] - me.pos[0], cp[1] - me.pos[1])
+            hp_now = float(c.get("hp", 300.0))
+            cw = self.crate_watch.get(cid)
+            if d > CRATE_STALL_M or cw is None or hp_now < cw[0] - 0.5 or t - cw[2] > 0.5:
+                self.crate_watch[cid] = (hp_now, t, t)
+            elif t - cw[1] > CRATE_STALL_S:
+                self.crate_ban[cid] = t + CRATE_STALL_BAN_S
+                self.crate_watch.pop(cid, None)
+                continue
+            else:
+                self.crate_watch[cid] = (cw[0], cw[1], t)
             if d > 88.0 or z.margin_at(cp[0], cp[1], t + 3.0) < 0.0:
                 continue
             if gun is None and (light is None or d > 42.0):
@@ -413,7 +622,12 @@ class Tactics:
         others = [o for o in enemies if o is not target and
                   (o.sees_us or t - o.t_hit_us <= 3.0 or (o.los and self._dist(me, o) <= 110.0))]
         sit = self.situation(me, target, others, corner_ready)
-        play, calc = D.choose_play(sit, calc if target is not None else None, prev=self.last_play)
+        self.mode.update(me, th, z)
+        squad = self.mode.squad()
+        gear = self._gear_hunter(me, enemies, squad, sit.unseen_hit)
+        play, calc = D.choose_play(sit, calc if target is not None else None, prev=self.last_play, squad=squad)
+        if squad and PF.on("squad_no_break"):
+            play = self._lose_rule(me, play, target, calc, enemies, sit, corner_ready)
         slack = self.mv.slack(me, z)
         dec.threat_yaw = self.danger_yaw(me)
         lt = self.laser_threat(me)
@@ -474,7 +688,12 @@ class Tactics:
 
         # ---------------- the air: brief pop-ups, roof edges, last-circle roofs (never exposed WallHop!)
         watchers = self.watchers(me)
-        if self._air(me, obs, dec, play, target, calc, enemies, slack):
+        if gear is not None:
+            # gear_first: no duel yet; loot at range, counters and the zone still apply below
+            intent = D.Intent(D.REPOSITION, None)
+            intent.label = "gear"
+            dec.intent = intent
+        if gear is None and self._air(me, obs, dec, play, target, calc, enemies, slack):
             dec.label = "air: " + self.air.name if self.air is not None else (intent.label or "")
             return dec
 
@@ -483,7 +702,9 @@ class Tactics:
             self.cov.want_hide(me, watchers, t, max_cost=65.0)
             self.cov.want_peek(Target.from_track(target, t, cube_sz).center(), t)
 
-        if play == D.ASSAULT:
+        if gear is not None:
+            self._gear(me, obs, dec, gear, slack)
+        elif play == D.ASSAULT:
             if intent.goal is not None:
                 far = math.hypot(intent.goal[0] - me.pos[0], intent.goal[1] - me.pos[1]) > 110.0
                 self.mv.go(intent.goal, me, z, prefer_cover=far, tag="assault", replan_dist=8.0)
