@@ -61,5 +61,34 @@ class KillDropTests(unittest.TestCase):
         self.assertFalse(any(l.startswith("kill drop") for l in labels), labels)
 
 
+class FightingRetreatTests(unittest.TestCase):
+    """Item 2 (done in abd7856, tests/test_redteam.py): breaking off keeps the torso and the gun on
+    the pursuer, and never starts a wall hop while it can see us. End to end, beside a roof the
+    version 2 wall hop would have jumped onto (Wilce Student Health Center, 11.9 m)."""
+
+    def test_losing_retreat_fires_faces_and_stays_on_the_ground(self):
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.opening_done = True
+        me = (20.0, -85.0)
+        px, py = 20.0, -35.0                      # pursuer 50 m north, looking at us, hitting us
+        aim = [0.0, 0.0]
+        acts = []
+        for k in range(14):
+            obs = zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=150.0 + 0.1 * k, aim=aim, hp=700))
+            p = enemy(9, px, py, w, -math.pi / 2, weapons=("gun", "laser"))
+            obs["mechs"] = [p]
+            if k % 2 == 0:
+                obs["events"] = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": math.pi / 2, "by": 9}]
+            a = bot.act(obs)
+            aim = a["aim"]
+            acts.append(a)
+            self.assertIsNone(bot.tactics.air)            # no wall hop, no air play of any kind
+            self.assertFalse(a["boost"] and a["jump"])
+        self.assertTrue(any(a["fire"][0] for a in acts))
+        to_p = math.atan2(py - me[1], px - me[0])
+        self.assertLess(abs(math.atan2(math.sin(acts[-1]["aim"][0] - to_p), math.cos(acts[-1]["aim"][0] - to_p))), 0.3)
+
+
 if __name__ == "__main__":
     unittest.main()
