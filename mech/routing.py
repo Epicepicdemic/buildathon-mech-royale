@@ -111,16 +111,16 @@ class Hop:
         self.done = False
         self.failed = False
 
-    def _under(self, x, y):
-        """Highest solid under our footprint (sight raster), or -inf without a world."""
+    def _under(self, x, y, mv):
+        """Highest solid under us and just ahead along our way (sight raster), or -inf without a
+        world. Walls beside the path do not count: we slide along those, we do not cross them."""
         w = self.w
         if w is None:
             return -1e9
         b = self.BODY
-        best = -1e9
-        for dx, dy in ((0.0, 0.0), (b, 0.0), (-b, 0.0), (0.0, b), (0.0, -b),
-                       (0.7 * b, 0.7 * b), (-0.7 * b, 0.7 * b), (0.7 * b, -0.7 * b), (-0.7 * b, -0.7 * b)):
-            v = w.sight(x + dx, y + dy)
+        best = w.sight(x, y)
+        for k in (0.5, 1.0):
+            v = w.sight(x + mv[0] * b * k, y + mv[1] * b * k)
             if v > best:
                 best = v
         return best
@@ -161,7 +161,7 @@ class Hop:
             boost = z < info.top + self.CLEAR and energy > 0.5
         else:
             # crossing: hold the feet above whatever is still under the body, then come down
-            under = self._under(x, y)
+            under = self._under(x, y, mv)
             boost = under > info.land_floor + 1.2 and z < under + 0.8 and energy > 0.5
             if not boost and self.w is not None and info.land_floor > info.launch_floor + 1.2 \
                     and self.w.floor(x, y) < info.land_floor - 1.0 and z < info.land_floor + 0.8 and energy > 0.5:

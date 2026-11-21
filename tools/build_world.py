@@ -135,6 +135,14 @@ def build(arena, out):
                 d = np.where(m & hm, hd, np.where(m, np.minimum(d, hd), d))  # inside a hole: distance to hole edge
                 m &= ~hm
         d = np.where(m, 0.0, d)
+        # thin prisms (slivers under 1.5 m across: 16 on this map, up to 21 m tall) can miss every
+        # 1 m vertex; count any vertex within 0.75 m of one as inside, or sight, shots and hop
+        # tops would not see a wall that the server collides with
+        ring_pts = list(zip(p["ring"][0::2], p["ring"][1::2]))
+        area = abs(sum(x1 * y2 - x2 * y1 for (x1, y1), (x2, y2) in zip(ring_pts, ring_pts[1:] + ring_pts[:1]))) / 2
+        per = sum(math.dist(a, b) for a, b in zip(ring_pts, ring_pts[1:] + ring_pts[:1]))
+        if per > 0 and 2 * area / per < 1.5:
+            m = m | (d <= 0.75)
         boxes.append((j0, j1, i0, i1, m, d))
     log(f"prism masks {time.time() - t0:.1f}s")
 
