@@ -60,6 +60,26 @@ class ZoneOverrideTests(unittest.TestCase):
         self.assertLess(a["move"][0], -0.5)       # heading west
         self.assertTrue(a["boost"])
 
+    def test_leaves_for_the_zone_on_a_slow_machine(self):
+        """With a fifth of the work budget the zone field is not ready for a while: the bot must
+        still head for the circle from the first decision (CI caught version 3 standing still)."""
+        import mech.brain as B
+        keep = B.WORK_BUDGET_S
+        B.WORK_BUDGET_S = 0.002
+        try:
+            w = world()
+            bot = Bot(hello(), world=w)
+            bot.tactics.opening_done = True
+            me = (300.0, -60.0)
+            for k in range(5):
+                obs = self_obs(pos=(me[0], me[1], w.floor(*me)), t=100.0 + 0.1 * k)
+                obs["zone"] = {"center": [41.3, -72.8], "radius": 560, "next_center": [-60.0, -60.0],
+                               "next_radius": 30, "shrink_start": 60, "shrink_end": 110, "dps": 20}
+                a = bot.act(obs)
+                self.assertLess(a["move"][0], -0.5)
+        finally:
+            B.WORK_BUDGET_S = keep
+
 
 if __name__ == "__main__":
     unittest.main()

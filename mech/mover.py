@@ -202,6 +202,20 @@ class Mover:
         urgent = (not me.in_zone) or (margin_now < bspeed * 3.0 + 6.0 and zone.margin_next(x, y) < 0 and t >= zone.shrink_start - 3)
         if not urgent and zone.margin_next(x, y) < 0:
             urgent = self.slack(me, zone) < 3.0
+        if urgent and not self.field_ready():
+            # the zone field is still being computed (about 100 ms of work, spread over decisions;
+            # longer on a slow machine): head straight for the circle meanwhile, round what is in
+            # the way, rather than stand still
+            self.urgent = True
+            cx, cy, _r = self.safe_circle(zone)
+            mv = self._fallback_dir(x, y, cx, cy)
+            if mv is not None:
+                boost = self.booster.want(True, me.energy) and me.grounded
+                self.last_move = mv
+                st = self.stuck.update(t, x, y, True)
+                jump, boost = self._unstick(st, me, False, boost)
+                self.note = "zone run (no field yet)"
+                return [mv[0], mv[1]], boost, jump
         if urgent and self.field_ready():
             self.urgent = True
             fol = self.zone_fol
@@ -291,6 +305,16 @@ class Mover:
             # in the air the boost button is the jets: running speed is not wanted up there
             boost = False
         return [move[0], move[1]], boost, jump
+
+    def _fallback_dir(self, x, y, gx, gy):
+        """Unit direction toward (gx, gy) that can be walked for 8 m, deflected up to 90 degrees."""
+        base = math.atan2(gy - y, gx - x)
+        for off in (0.0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2, 1.57, -1.57):
+            a = base + off
+            ux, uy = math.cos(a), math.sin(a)
+            if self.w.walkable(x, y, x + ux * 8.0, y + uy * 8.0, need=2.7, skip_start=1.0):
+                return (ux, uy)
+        return None
 
     # ------------------------------------------------------------------ hops
     def _start_hop(self, me, fol, k, info):
