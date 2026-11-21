@@ -385,6 +385,11 @@ class Tactics:
             if watchers:
                 self.cov.want_hide(me, watchers, t, max_cost=100.0)
             hide = self.cov.hide_xy() if hide is not None or self.cov.hide is not None else None
+            if hit_now and me.speed() < 2.0 and self.displace is None and th.last_damage is not None \
+                    and th.last_damage[1] is not None and self._shootable(me, enemies) is None:
+                goal = self.displacement(me, th.last_damage[1], dist=12.0)
+                if goal is not None:
+                    self.displace = (goal, t + 1.5)
             if hit_now:
                 alt = self._shootable(me, enemies)
                 if alt is not None:
@@ -587,7 +592,10 @@ class Tactics:
         if math.hypot(self.second_goal[0] - me.pos[0], self.second_goal[1] - me.pos[1]) < 3.0:
             return False
         self.mv.go(self.second_goal, me, self.zone, prefer_cover=True, tag="open-second", replan_dist=4.0)
-        dec.speed = "silent"
+        # steps carry 40 m: creep only when something may be that close, otherwise get there fast
+        close = any(self._dist(me, tr) < 55.0 for tr in self.th.active_mechs(t, 8.0)) or \
+            any(c.band == "near" and t - c.t < 5.0 for c in self.th.contacts)
+        dec.speed = "silent" if close else "walk"
         dec.intent.label = "opening: second"
         return True
 
@@ -734,6 +742,8 @@ class Tactics:
                         intent.label = "roof: edge"
                     self.mv.clear()
                     return True
+            if any(e.sees_us for e in enemies):
+                leave = True            # seen up here: a roof is a short stop, not a home
             if not leave and (me.hp_frac < 0.93 or target is not None):
                 # heal up here, out of reach of ground bots
                 dec.hold = True
@@ -771,8 +781,14 @@ class Tactics:
             d = math.hypot(tp[0] - me.pos[0], tp[1] - me.pos[1])
             hide = self.cov.hide_xy()
             far_hide = hide is None or math.hypot(hide[0] - me.pos[0], hide[1] - me.pos[1]) > 25.0
-            if d < 80.0 and far_hide and slack > 30.0:
+            if d < 60.0 and far_hide and slack > 30.0 and me.hp_frac >= 0.4:
                 hop = A.WallHop.find(w, me, away_from=(tp[0], tp[1]), cfg_mech=mech_cfg)
+                if hop is not None:
+                    # only onto a spot none of the watchers can see (height of the roof, not the ground)
+                    for wx, wy, wz in self.watchers(me):
+                        if w.sees((wx, wy, wz), (hop[0], hop[1], hop[2]), me.height, step=2.0):
+                            hop = None
+                            break
                 if hop is not None:
                     self.air = A.WallHop()
                     self.air.start(t, hop)

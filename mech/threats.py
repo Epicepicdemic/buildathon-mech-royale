@@ -425,6 +425,15 @@ class Threats:
         """Positions (x, y, z_eye) from which something hostile might be watching us."""
         pts = []
         for tr in self.active_mechs(me.t, window):
+            if tr.phantom and self.last_damage is not None and self.last_damage[2] == tr.id \
+                    and self.last_damage[1] is not None:
+                # only a bearing is known: something anywhere along it may be watching
+                b = self.last_damage[1]
+                for d in (45.0, 95.0, 160.0, 220.0):
+                    x, y = me.pos[0] + math.cos(b) * d, me.pos[1] + math.sin(b) * d
+                    f = self.w.floor(x, y) if self.w is not None else me.pos[2]
+                    pts.append((x, y, f + 8.0))
+                continue
             p = tr.est_pos(me.t)
             pts.append((p[0], p[1], p[2] + 8.0))
         if include_contacts:
