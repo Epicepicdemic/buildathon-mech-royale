@@ -11,19 +11,42 @@ modes. Pieces switched off here are kept for the next candidates (round table 12
                        shooting it while we loot toward a laser and 6 cubes, then fight (R12 A)
     squad_no_break     squad mode: no break for a second mech within 160 m or for HP under 30%;
                        retreat only after 1.5 s of clearly losing, never while finishing a kill
-    gun_during_charge  keep the gun firing while the laser charges (both modes)
+    lose_isolate       ... and while two or more shooters see us, step (boost) to a cell within
+                       24 m hidden from all but the target first (R12 B, Carbon)
+    sticky_target      target by (its DPS on us + 80) / max(HP, 120), keeping the current one at
+                       x2.2 (x3.0 under 35% HP); in a free-for-all not with two shooters in sight
+    airborne_aim       a mech 0.45 m off the ground: no dodge discount in FightCalc, gravity in
+                       the gun's lead, long bursts to 165 m (R12 B, Carbon)
+    gun_during_charge  keep the gun firing while the laser charges, the torso on the laser's line:
+                       only when the gun's lead is within 0.12 rad of it (both modes)
     partial_release    release the laser early when its partial charge already kills (both modes)
-    finish_close       close to 20 m to finish a weak target (both modes)
+    finish_close       close to 20 m to finish a weak target (both modes), never inside 58 m of
+                       its lightning (unless ours is ready) or 75 m of its mortar. Off from R12 B
+                       (analysis/mech/HOUSE-BOTS.md: 84% of expert kills are under 78 m)
+    house_aim          squad mode: what the house bots land on us by range, as measured over 42
+                       expert matches (HOUSE-BOTS.md section 1), and floors of 70 m from a
+                       lightning holder (kiting back) and 95 m from a mortar holder
+    mortar_priority    our laser does x1.6 to a mortar holder (the cook-off): counted in the
+                       fight calculation, the partial release and the target choice (both modes)
+    punish_reload      a target heard reloading lands little for 2.2 s: counted in the fight
+                       calculation and the target choice (both modes; experts reload in the
+                       open 92% of the time)
 """
 import math
 
 PROFILE = {
     "mode_detector": True,
     "gear_first": True,
-    "squad_no_break": False,
-    "gun_during_charge": False,
-    "partial_release": False,
+    "squad_no_break": True,
+    "lose_isolate": True,
+    "sticky_target": True,
+    "airborne_aim": True,
+    "gun_during_charge": True,
+    "partial_release": True,
     "finish_close": False,
+    "house_aim": True,
+    "mortar_priority": True,
+    "punish_reload": True,
 }
 
 SQUAD_AFTER_S = 20.0        # no squad decision before this
