@@ -27,7 +27,36 @@ EVEN_RATIO = 0.72
 NEAR_OTHERS_M = 160.0
 FINISH_TARGET_HP = 0.38     # finish_close: the target under this share of HP ...
 FINISH_OWN_HP = 0.42        # ... us over this ...
-FINISH_M = 20.0             # ... closes to this
+FINISH_M = 20.0             # ... closes to this, but never inside
+FINISH_LIGHTNING_M = 58.0   # ... its lightning (unless ours is ready: energy over 35) ...
+FINISH_MORTAR_M = 75.0      # ... or its mortar's throw-back
+STICKY = 2.2                # sticky_target: the current target's score multiplier ...
+STICKY_WEAK = 3.0           # ... when it is under 35% HP
+RELOAD_S = 2.2              # punish_reload: a reload heard this recently is still going on
+HOUSE_LIGHTNING_M = 70.0    # house_aim (squad): never inside this of a lightning holder ...
+HOUSE_MORTAR_M = 95.0       # ... or this of a mortar holder
+# house_aim: house:expert hit rates by range (analysis/mech/HOUSE-BOTS.md section 1, measured over 42
+# matches; the laser's split under 105 m is ours, fitted to its 25.6% overall and 70 m median hit)
+HOUSE_GUN = ((45.0, 0.875), (78.0, 0.634), (105.0, 0.431), (135.0, 0.282), (150.0, 0.279), (1e9, 0.169))
+HOUSE_LASER = ((45.0, 0.50), (78.0, 0.40), (105.0, 0.25), (135.0, 0.12), (150.0, 0.067), (1e9, 0.04))
+
+
+def _band(table, dist):
+    for top, p in table:
+        if dist < top:
+            return p
+    return table[-1][1]
+
+
+def cookoff_mult(enemy, cfg):
+    """mortar_priority: a laser hit on a mech holding a mortar sets it off (x1.6 by the config)."""
+    if not PF.on("mortar_priority") or not getattr(enemy, "has", lambda k: False)("mortar"):
+        return 1.0
+    return 1.0 + float(_wstats(cfg, "laser").get("cookoff", 0.6))
+
+
+def reloading(enemy, t):
+    return PF.on("punish_reload") and t - getattr(enemy, "t_reload_heard", -1e9) <= RELOAD_S
 HYST = 0.2
 CORNER_TAKE = 0.72      # from a corner we fight unless the calculation says we clearly lose
 
@@ -102,7 +131,8 @@ class Situation:
 
     def __init__(self, t, me_pos, me_yaw, me_hp, me_max_hp, me_weapons, enemy=None, others=(),
                  me_cubes=0, me_energy=100.0, me_armor=0.0, corner=False, unseen_hit=False,
-                 long_sight=True, cfg=None, airborne=False, healing=False, gun_ammo=None, shorted=False):
+                 long_sight=True, cfg=None, airborne=False, healing=False, gun_ammo=None, shorted=False,
+                 house=False):
         self.t = t
         self.me_pos = me_pos
         self.me_yaw = me_yaw
@@ -122,6 +152,7 @@ class Situation:
         self.healing = healing
         self.gun_ammo = gun_ammo
         self.shorted = shorted
+        self.house = house                    # house_aim: squad mode, the opponents are house bots
 
 
 class FightCalc:
@@ -140,13 +171,19 @@ class FightCalc:
         self.unaware = not getattr(e, "sees_us", True) and sit.t - getattr(e, "t_hit_us", -1e9) > 3.0
         still = e.still() if hasattr(e, "still") else False
         dodging = e.dodging() if hasattr(e, "dodging") else True
+        # airborne_aim: a mech in the air cannot reverse (12 m/s^2 net jet), so our led gun lands
+        # to ~170 m (brainstorm/r12/mech-carbon.md: 91.6% measured over 22,234 airborne frames)
+        self.e_airborne = PF.on("airborne_aim") and bool(getattr(e, "airborne", False))
         cfg = sit.cfg
         ours = 0.0
         for kind, st in sit.me_weapons.items():
             if kind == "laser" and sit.shorted:
                 continue
-            ours += weapon_dps(kind, st, sit.me_cubes, self.dist, dodging and not self.unaware, still,
-                               sit.me_energy, cfg)
+            d = weapon_dps(kind, st, sit.me_cubes, self.dist, dodging and not self.unaware, still,
+                           sit.me_energy, cfg, airborne=self.e_airborne)
+            if kind == "laser":
+                d *= cookoff_mult(e, cfg)
+            ours += d
         if self.rear:
             ours *= float((cfg.get("mech") or {}).get("rear_mult", 1.5))
         self.our_dps = ours
@@ -160,6 +197,9 @@ class FightCalc:
         if self.unaware:
             theirs *= 0.6
         self.their_dps_on_us = theirs
+        # its threat over the fight (a reload is a moment to punish, not a reason to rank it lower)
+        self.threat_dps = theirs if not reloading(e, sit.t) else theirs * self.their_dps(e, self.dist, False) \
+            / max(self.their_dps(e, self.dist), 1e-6)
         extra = 0.0
         for o in sit.others:
             po = o.est_pos(sit.t) if hasattr(o, "est_pos") else o.pos
@@ -186,7 +226,7 @@ class FightCalc:
         if g:
             burst += float(g.get("damage", 45.0)) * cube_mult(sit.me_cubes, cfg) * float(g.get("mag", 12.0)) * 0.9
         if "laser" in sit.me_weapons and not sit.shorted:
-            burst += float(sit.me_weapons["laser"].get("damage", 315.0)) * cube_mult(sit.me_cubes, cfg)
+            burst += float(sit.me_weapons["laser"].get("damage", 315.0)) * cube_mult(sit.me_cubes, cfg) * cookoff_mult(e, cfg)
         if "lightning" in sit.me_weapons and self.dist <= float(sit.me_weapons["lightning"].get("range", 45.0)):
             burst += 60.0 * 10 * cube_mult(sit.me_cubes, cfg)
         if self.rear:
@@ -194,16 +234,30 @@ class FightCalc:
         self.burst = burst
         self.finishable = hp <= burst
 
-    def their_dps(self, e, dist):
+    def their_dps(self, e, dist, discount_reload=True):
         sit = self.sit
         cfg = sit.cfg
         m = cube_mult(getattr(e, "cubes", 0), cfg)
         wpn = getattr(e, "weapons", ["gun"]) or ["gun"]
         tot = 0.0
         we_dodge = not sit.airborne
+        house = sit.house and PF.on("house_aim")
         for kind in wpn:
             st = _wstats(cfg, kind)
-            if kind == "gun":
+            if kind == "gun" and house:
+                _, sus = gun_dps(st or {}, getattr(e, "cubes", 0), cfg)
+                p = 0.0 if dist > float((st or {}).get("range", 230.0)) else _band(HOUSE_GUN, dist)
+                tot += sus * p * (0.25 if discount_reload and reloading(e, sit.t) else 1.0)
+            elif kind == "laser" and house:
+                if dist <= float((st or {}).get("range", 280.0)):
+                    tot += 315.0 * m / 2.4 * _band(HOUSE_LASER, dist)
+            elif kind == "lightning" and house:
+                if dist <= float((st or {}).get("range", 45.0)) + 3:
+                    tot += 240.0 * m * 0.83                     # 83.2% of expert zaps land
+            elif kind == "mortar" and house:
+                if 12.0 < dist <= 235.0:
+                    tot += 280.0 * m / 2.6 * 0.38               # 37.7% of expert shells land
+            elif kind == "gun":
                 _, sus = gun_dps(st or {}, getattr(e, "cubes", 0), cfg)
                 rr = reversal_range(float((st or {}).get("speed", 252.0)), accel=12.0 if sit.airborne else 58.5)
                 if dist > float((st or {}).get("range", 230.0)):
@@ -212,6 +266,8 @@ class FightCalc:
                     p = 0.8
                 else:
                     p = max(0.15, 0.8 * rr / dist * 0.6)
+                # (no reload discount here: in a free-for-all a reload heard is no reason to close in;
+                # top teams land 85% of gun shots at 45-78 m, recon/replays/tables.md, 67 matches)
                 tot += sus * p
             elif kind == "laser":
                 if dist <= float((st or {}).get("range", 280.0)):
@@ -264,19 +320,29 @@ class Assault:
         want = 38.0 if "lightning" in sit.me_weapons else 62.0
         if "laser" in sit.me_weapons and "lightning" not in sit.me_weapons:
             want = 85.0
+        house = getattr(sit, "house", False) and PF.on("house_aim")
         if getattr(e, "has", lambda k: False)("mortar"):
             # its blast throws us back and drains the energy lightning needs: stay at gun/laser range
-            want = max(want, 75.0)
-        if getattr(e, "has", lambda k: False)("lightning") and "lightning" not in sit.me_weapons:
-            # never walk into a 240-DPS lightning cone when we outrange it with gun/laser
-            want = max(want, 58.0)
+            want = max(want, HOUSE_MORTAR_M if house else 75.0)
+        if getattr(e, "has", lambda k: False)("lightning") and ("lightning" not in sit.me_weapons or house):
+            # never walk into a 240-DPS lightning cone when we outrange it with gun/laser (house
+            # experts with gun and lightning rush at every range and score 36% of their kills
+            # with it: a hard floor of 70 m)
+            want = max(want, HOUSE_LIGHTNING_M if house else 58.0)
         if PF.on("finish_close"):
             # finish a weak target from close (recon/rea-mech-royale.md P2): it under 38% HP, us over
             # 42%, at most two others near
             e_hp = e.hp_frac() if hasattr(e, "hp_frac") else 1.0
             if e_hp < FINISH_TARGET_HP and sit.me_hp / max(sit.me_max_hp, 1.0) > FINISH_OWN_HP \
                     and len(sit.others) <= 2:
-                want = FINISH_M
+                # the clamps stand (brainstorm/r12: 20 m walked 928be36 into lightning range)
+                fin = FINISH_M
+                has = getattr(e, "has", lambda k: False)
+                if has("lightning") and not ("lightning" in sit.me_weapons and sit.me_energy >= 35.0):
+                    fin = max(fin, FINISH_LIGHTNING_M)
+                if has("mortar"):
+                    fin = max(fin, FINISH_MORTAR_M)
+                want = min(want, fin)
         if dist > want:
             # approach: toward the rear side when it is not looking at us
             if not getattr(e, "sees_us", True):
@@ -285,7 +351,8 @@ class Assault:
                 it.goal = (p[0], p[1])
             it.spot = "approach"
             it.speed = "boost" if dist > want + 25 and sit.me_energy > 35 else "walk"
-        elif dist < 49.0 and getattr(e, "has", lambda k: False)("lightning") and "lightning" not in sit.me_weapons:
+        elif getattr(e, "has", lambda k: False)("lightning") and ("lightning" not in sit.me_weapons or house) \
+                and dist < (HOUSE_LIGHTNING_M if house else 49.0):
             # kite back outside 45 m while firing full bursts
             dx, dy = sit.me_pos[0] - p[0], sit.me_pos[1] - p[1]
             d = math.hypot(dx, dy) or 1.0
@@ -461,23 +528,40 @@ def _dist(sit, o):
     return math.hypot(p[0] - sit.me_pos[0], p[1] - sit.me_pos[1])
 
 
-def pick_target(sit_factory, enemies, t, me_pos):
-    """Choose the primary enemy: weak, close, already engaged elsewhere, attacking us."""
+def pick_target(sit_factory, enemies, t, me_pos, prev_id=None, squad=False):
+    """Choose the primary enemy: weak, close, already engaged elsewhere, attacking us.
+    sticky_target (mech/profile.py): score by (its DPS on us + 80) / max(HP, 120) and keep the
+    current target (`prev_id`) at x2.2, x3.0 under 35% HP, so a second hunter's hit no longer
+    pulls us off a nearly dead one. Counter (a free-for-all crossfire): no stickiness there while
+    two or more shooters have us in sight."""
     best = None
+    sticky_on = PF.on("sticky_target")
+    shooters = sum(1 for e in enemies if getattr(e, "los", False) and getattr(e, "sees_us", False))
+    keep = sticky_on and prev_id is not None and (squad or shooters < 2)
     for e in enemies:
         sit = sit_factory(e)
         calc = FightCalc(sit, e)
-        score = calc.ratio
+        if sticky_on:
+            score = (calc.threat_dps + 80.0) / max(calc.enemy_hp, 120.0)
+        else:
+            score = calc.ratio
         visible = getattr(e, "los", False)
         if not visible:
             score *= 0.35            # a memory or a sound: anything we can actually shoot comes first
         if e.engaged_elsewhere(t) if hasattr(e, "engaged_elsewhere") else False:
             score *= 1.55
         if getattr(e, "t_hit_us", -1e9) >= t - 2.0:
-            score *= 2.0             # whoever is hitting us now
+            score *= 1.3 if sticky_on else 2.0       # whoever is hitting us now
         if calc.finishable and visible:
             score *= 2.1
+        if "laser" in sit.me_weapons:
+            score *= cookoff_mult(e, sit.cfg)          # mortar_priority: our laser does x1.6 to it
+        if visible and reloading(e, t):
+            score *= 1.4                               # punish_reload: caught reloading in the open
         score /= 1.0 + calc.dist / 250.0
+        if keep and getattr(e, "id", None) == prev_id:
+            hf = e.hp_frac() if hasattr(e, "hp_frac") else 1.0
+            score *= STICKY_WEAK if hf < 0.35 else STICKY
         if best is None or score > best[0]:
             best = (score, e, calc)
     return (best[1], best[2]) if best else (None, None)

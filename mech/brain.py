@@ -63,6 +63,8 @@ class Bot:
         end = t0 + WORK_BUDGET_S
         self.mover.work(me, self.zone, end - 0.0012)
         self.cover.run(end - 0.0004)
+        if self.tactics.isolating:
+            self.tactics.iso.run(end - 0.0002)
         for srch in (self.tactics.opening_search, self.tactics.second_search):
             if srch is not None and not srch.done and time.perf_counter() < end:
                 srch.run(end)

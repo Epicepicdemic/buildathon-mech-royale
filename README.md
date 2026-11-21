@@ -17,7 +17,7 @@ Line B (`Wilce-B`) of our `mechfight/1` bot for the Builders Buildathon Mech Roy
 | `mech/air.py` | Wall hop, roof edge (with pitch depression check), drop attack, laser pop-up, last-circle roof. |
 | `mech/gunner.py`, `mech/ballistics.py` | Slew-aware gun aim, weave-damped leads, bursts, laser charge and release, lightning, mortar arcs. |
 | `mech/positions.py`, `mech/cover.py`, `mech/tactics.py`, `mech/mover.py`, `mech/brain.py` | Strongpoint selection, cover search, per-tick tactical arbitration, bullet/shell dodging, and time budget. |
-| `mech/profile.py` | Squad-practice profile: a mode detector from observation only (free-for-all by default and for good on any sign of one), squad-only gear-before-kill pacing (round table 12), the squad play choice, and switches for each piece. |
+| `mech/profile.py` | Squad-practice profile: a mode detector from observation only (free-for-all by default and for good on any sign of one), squad-only gear-before-kill pacing (round table 12), the squad play choice with isolation from all but one shooter, sticky DPS/HP targeting, airborne aim, the damage pieces, and switches for each piece. |
 | `tests/` | Unit tests, Line B regression tests (`test_line_b.py`), the 500-case route test and the recorded-stream replay. |
 | `tools/route_test.py`, `tools/kinesim.py` | Route test harness and the approximate movement model it drives. |
 
@@ -63,13 +63,45 @@ switches on when the first hunter converges after 35 s.
   55 m has its torso within 0.45 rad of us, we are hit from out of sight, or a second hunter comes
   within 180 m. The pacing ends for good under half HP, after a second kill, at 65 s, or with a
   laser and 6 cubes (or 10 cubes).
+- No break (`squad_no_break`): a second mech within 160 m and HP under 30% are not reasons to
+  break. A break stands only after 1.5 s of clearly losing (two or more mechs within 160 m and HP
+  under 55%, three or more and under 80%, or under 35% against a healthier target), and never while
+  finishing (one burst kills, or the target is at or under 30% HP). Otherwise we fight from the
+  corner if one is ready, else assault.
+- Isolation (`lose_isolate`): while two or more other shooters within 160 m see us, the target
+  sees us, and we are not finishing, we boost to a cell within 24 m hidden from all of them but the
+  target, the gun firing on the way.
+- House-bot numbers (`house_aim`): the fight calculation uses the hit rates measured for house
+  experts (analysis/mech/HOUSE-BOTS.md): gun 87.5% under 45 m down to 17% beyond 150 m, laser 12% at
+  105-135 m and 6.7% at 135-150 m (our fit elsewhere: 50% under 45 m down to 4% beyond 150 m), zap 83%,
+  mortar 38%. Assault keeps a floor of 70 m from a lightning holder (kiting back inside
+  it) and 95 m from a mortar holder.
+- Reloads (`punish_reload`): a target heard reloading in the last 2.2 s counts its gun at a quarter in
+  the fight calculation.
 
-### What changes in both modes
+### What changes in both modes (free-for-all play too)
 
+- Sticky target (`sticky_target`): targets are scored by (their damage per second on us + 80) /
+  max(HP, 120), and the current target is kept at x2.2 (x3.0 under 35% HP). In a free-for-all there
+  is no stickiness while two or more shooters have us in sight.
+- Airborne aim (`airborne_aim`): a mech more than 0.45 m above the ground or roof under it counts as
+  airborne. The fight calculation then gives it no dodge discount, and the gun's lead adds gravity
+  (22 m/s^2, never below that ground) while it climbs slower than 6 m/s. There is no weave damping,
+  and long bursts go to 165 m.
+- Gun during the laser charge (`gun_during_charge`): the torso stays on the laser's line; the gun fires
+  only when its own lead is within 0.12 rad of that line and its aim test passes.
+- Early release (`partial_release`): the laser is released as soon as 70% of a release now (with the
+  cook-off) would kill the target.
+- Cook-off (`mortar_priority`): our laser does x1.6 to a mortar holder (the config's `cookoff`). This
+  counts in the fight calculation, the one-burst kill test, the early release, and the target score
+  (x1.6 when we hold a laser).
+- Reloads (`punish_reload`): a target heard reloading in the last 2.2 s scores x1.4 as a target
+  (squad mode also changes the fight calculation, above).
+- `finish_close` is off.
 - Crate stall guard (`mech/tactics.py`): a crate within 12 m that loses no HP for 3 s while we
   farm it is left alone for 20 s (point-blank it can sit below our pitch).
 
-Carried but off: `squad_no_break`, `gun_during_charge`, `partial_release`, `finish_close`. Not included: the wall back-off of candidate 1.
+Not included: the wall back-off of candidate 1.
 
 ## Build and check
 
