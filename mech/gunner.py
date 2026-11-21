@@ -14,7 +14,10 @@ from . import ballistics as bal
 from . import profile as PF
 from .geom import wrap, angdiff, clamp
 
-GUN_AIM_UNTIL = 0.45        # gun_during_charge: the torso follows the gun's lead below this share
+GUN_LEAD_RAD = 0.12         # gun_during_charge: the gun fires while the laser charges only when its
+                            # lead is this close to the laser's line (the torso never leaves it)
+AIR_LONG_M = 165.0          # airborne_aim: long bursts at an airborne mech to this range ...
+AIR_FALL_VZ = 6.0           # ... and gravity in the lead while it climbs slower than this
 
 
 class Target:
@@ -64,15 +67,49 @@ class Gunner:
         sp = pitch if abs(dp) <= mp else me.pitch + math.copysign(mp, dp)
         return sy, clamp(sp, me.min_pitch, me.max_pitch)
 
+    @staticmethod
+    def _airborne(tgt):
+        tr = tgt.track
+        return PF.on("airborne_aim") and tgt.kind == "mech" and tr is not None and bool(getattr(tr, "airborne", False))
+
+    def _fall_lead(self, me, tgt, tvel, speed, latency, ground):
+        """Like bal.lead, with gravity on z (brainstorm/r12/mech-carbon.md): an airborne mech off its
+        jets falls at 22 m/s^2 until it lands on the ground under it."""
+        g = float((self.cfg.get("mech") or {}).get("gravity", 22.0))
+        ox, oy, oz = me.muzzle
+        ox += me.vel[0] * latency
+        oy += me.vel[1] * latency
+        c = tgt.center()
+        zmin = ground + tgt.height * 0.5 if ground is not None else -1e9
+        t = 0.0
+        q = c
+        for _ in range(5):
+            T = latency + t
+            q = (c[0] + tvel[0] * T, c[1] + tvel[1] * T, max(zmin, c[2] + tvel[2] * T - 0.5 * g * T * T))
+            d = math.sqrt((q[0] - ox) ** 2 + (q[1] - oy) ** 2 + (q[2] - oz) ** 2)
+            t = max(0.0, d - bal.SHOT_OFFSET) / speed
+        T = latency + t
+        q = (c[0] + tvel[0] * T, c[1] + tvel[1] * T, max(zmin, c[2] + tvel[2] * T - 0.5 * g * T * T))
+        yaw, pitch = bal.aim_angles(q[0] - ox, q[1] - oy, q[2] - oz)
+        return yaw, pitch, t, q
+
     def _gun_aim(self, me, tgt, gun):
         speed = gun.stat("speed", 252.0)
         tvel = tgt.vel
         tr = tgt.track
-        if tr is not None and tgt.kind == "mech":
+        air = self._airborne(tgt)
+        if tr is not None and tgt.kind == "mech" and not air:
+            # (in the air it cannot reverse: no weave damping)
             dist = math.hypot(tgt.pos[0] - me.pos[0], tgt.pos[1] - me.pos[1])
             if dist > bal.reversal_range(speed) and tr.dodging() and hasattr(tr, "mean_vel"):
                 mv = tr.mean_vel(0.75)
                 tvel = (0.48 * tvel[0] + 0.52 * mv[0], 0.48 * tvel[1] + 0.52 * mv[1], tvel[2])
+        if air and tvel[2] < AIR_FALL_VZ:
+            ground = getattr(tr, "ground", None)
+            yaw0, pitch0, _, _ = self._fall_lead(me, tgt, tvel, speed, 0.05, ground)
+            ta = bal.time_to_align(me.yaw, me.pitch, yaw0, pitch0, me.turn_rate, me.pitch_rate)
+            yaw, pitch, tf, aimp = self._fall_lead(me, tgt, tvel, speed, 0.05 + min(ta, 0.5), ground)
+            return yaw, clamp(pitch, me.min_pitch, me.max_pitch), tf, aimp
         yaw0, pitch0, _, _ = bal.lead(me.muzzle, tgt.center(), tvel, speed, latency=0.05, ovel=me.vel)
         # allow for the time the torso needs to get there
         ta = bal.time_to_align(me.yaw, me.pitch, yaw0, pitch0, me.turn_rate, me.pitch_rate)
@@ -130,6 +167,11 @@ class Gunner:
         frac = mf + (1.0 - mf) * min(1.0, (laser.charge - lo) / max(full - lo, 1e-6))
         return laser.stat("damage", 315.0) * frac * cube_mult(me.cubes, self.cfg)
 
+    def release_damage(self, me, laser, tgt):
+        from .doctrine import cookoff_mult
+        mult = cookoff_mult(tgt.track, self.cfg) if tgt.track is not None else 1.0
+        return self.laser_damage(me, laser) * mult
+
     def control(self, me, intent, tgt, obstacles=(), face_yaw=None, move_yaw=None, events=()):
         """Returns (aim [yaw, pitch], fire [b0, b1], reload bool, info dict)."""
         t = me.t
@@ -163,13 +205,14 @@ class Gunner:
             if laser_active:
                 yaw, pitch, aimp = self._direct_aim(me, tgt, latency=self.dt)
                 full = laser.stat("charge", 0.75)
+                aim = [yaw, pitch]
                 if gun is not None and PF.on("gun_during_charge"):
-                    # both slots fire on their own aim test (recon/rea-mech-royale.md P2): the torso
-                    # follows the gun's lead until the charge passes 45%, then the laser's line
-                    gun_sol = self._gun_aim(me, tgt, gun)
-                    aim = [gun_sol[0], gun_sol[1]] if laser.charge < GUN_AIM_UNTIL * full else [yaw, pitch]
-                else:
-                    aim = [yaw, pitch]
+                    # the torso stays on the laser's line (following the gun's lead cost 928be36 36%
+                    # of its laser damage, brainstorm/r12/mech-neon.md); the gun fires on its own test
+                    # only when its lead is within 0.12 rad of that line
+                    gs = self._gun_aim(me, tgt, gun)
+                    if angdiff(gs[0], yaw) <= GUN_LEAD_RAD and abs(gs[1] - pitch) <= GUN_LEAD_RAD:
+                        gun_sol = gs
                 sy, sp = self._slewed(me, yaw, pitch, 0.05)
                 on = bal.on_target(sy, sp, yaw, pitch, cdist, tgt.radius, tgt.height / 2, 0.7)
                 clear = tgt.visible and self._clear_line(me, aimp)
@@ -183,9 +226,8 @@ class Gunner:
                         and (no_laser_start or (dist > 140 and tgt.track is not None and not tgt.track.los)):
                     release = True
                 if not release and on and clear and PF.on("partial_release") and tgt.track is not None \
-                        and tgt.track.hp is not None and 0.7 * self.laser_damage(me, laser) >= tgt.track.hp \
-                        and (gun_sol is None or laser.charge >= GUN_AIM_UNTIL * full):
-                    release = True                  # a partial charge already kills it (once on its line)
+                        and tgt.track.hp is not None and 0.7 * self.release_damage(me, laser, tgt) >= tgt.track.hp:
+                    release = True                  # a partial charge already kills it
                 fire[laser.slot] = not release
                 if release:
                     self.laser_hold_since = None
@@ -216,7 +258,8 @@ class Gunner:
                     # Full bursts inside max(rr, 95 m) or whenever target is not actively dodging;
                     # beyond 160 m without nearby cover, use brisk 5-shot bursts if dodging.
                     long_ok = dist <= max(rr, 95.0) or tgt.kind != "mech" or tr is None \
-                        or not tr.dodging() or tr.still() or not tr.sees_us
+                        or not tr.dodging() or tr.still() or not tr.sees_us \
+                        or (self._airborne(tgt) and dist <= AIR_LONG_M)
                     if dist > 160.0 and not getattr(intent, "cover_near", True) and tr is not None and tr.dodging():
                         long_ok = False
                     eff = mode

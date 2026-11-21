@@ -14,6 +14,7 @@ from . import air as A
 from . import doctrine as D
 from . import positions as P
 from .geom import angdiff, bearing, unit, wrap
+from .cover import CoverState
 from .gunner import Target
 from .loot import LootMemory
 from . import profile as PF
@@ -21,6 +22,7 @@ from . import profile as PF
 WANTED_WEAPONS = ("laser", "lightning")     # laser first (kills happen at range), lightning second, never mortar
 LOSE_S = 1.5            # squad_no_break: clearly losing this long before a break stands
 LOSE_NEAR_M = 160.0     # ... counting mechs this close
+ISOLATE_M = 24.0        # lose_isolate: a cell this close hidden from all shooters but the target
 GEAR_UNTIL_S = 50.0     # gear_first (mech/profile.py): the opening pacing ends at this time ...
 GEAR_KILLS = 1          # ... or after more kills than this
 GEAR_NEAR_M = 180.0     # a second mech this close: fight (pacing stands aside meanwhile)
@@ -102,6 +104,9 @@ class Tactics:
         self.cfg = cfg
         self.mv = mover
         self.cov = cover
+        self.iso = CoverState(world, random.Random(seed + 7))   # lose_isolate: hidden from all but the target
+        self.isolating = False
+        self.prev_target_id = None      # sticky_target
         self.th = threats
         self.zone = zone
         self.loot = LootMemory(cfg)
@@ -184,19 +189,31 @@ class Tactics:
     def _lose_rule(self, me, play, target, calc, enemies, sit, corner_ready):
         """Squad profile: the squad shares vision, so hiding buys nothing. A break stands only once
         we have been clearly losing for 1.5 s, never while finishing a kill; otherwise fight from
-        the corner if one is ready, else press."""
+        the corner if one is ready, else press. lose_isolate: while two or more shooters within
+        160 m see us and we are not finishing, first boost to a cell within 24 m hidden from all of
+        them but the target (brainstorm/r12/mech-carbon.md: the open 2v1 at laser-charge speed lost)."""
         t = me.t
         if self._losing(me, target, enemies):
             if self.losing_since is None:
                 self.losing_since = t
         else:
             self.losing_since = None
-        if play != D.BREAK or target is None or sit.unseen_hit or calc is None or calc.our_dps <= 1e-6:
+        if target is None or sit.unseen_hit or calc is None or calc.our_dps <= 1e-6:
             return play
         finishing = calc.finishable or target.hp_frac() <= 0.30
-        if not finishing and self.losing_since is not None and t - self.losing_since >= LOSE_S:
-            return play
-        return D.CORNER if corner_ready else D.ASSAULT
+        if play == D.BREAK:
+            if not finishing and self.losing_since is not None and t - self.losing_since >= LOSE_S:
+                return play
+            play = D.CORNER if corner_ready else D.ASSAULT
+        if PF.on("lose_isolate") and play in (D.CORNER, D.ASSAULT) and not finishing:
+            pts = [(p[0], p[1], p[2] + 8.0) for p in (e.est_pos(t) for e in enemies
+                   if e is not target and not e.dead and (e.los or e.sees_us)
+                   and self._dist(me, e) <= LOSE_NEAR_M)]
+            if pts and (target.los or target.sees_us):
+                self.isolating = True
+                if t - self.iso.fail_t > 1.0:         # no such cell here: look again in a second
+                    self.iso.want_hide(me, pts, t, max_cost=ISOLATE_M)
+        return play
 
     def _geared(self, me):
         return me.cubes >= 10 or (me.has("laser") and me.cubes >= GEAR_CUBES)
@@ -345,6 +362,7 @@ class Tactics:
             self.cfg, not me.grounded, self.healing,
             g.ammo if g is not None else None,
             shorted=shorted,
+            house=self.mode.squad(),
         )
 
     def watchers(self, me, window=6.0):
@@ -615,16 +633,18 @@ class Tactics:
         corner_ready = (self.cov.hide is not None and self.cov.peek is not None) or \
             (wall_beside and self.cov.fail_t < t - 2.0)
 
+        self.mode.update(me, th, z)
+        squad = self.mode.squad()
         target, calc = D.pick_target(
             lambda e: self.situation(me, e, [o for o in enemies if o is not e], corner_ready),
-            enemies, t, me.xy,
+            enemies, t, me.xy, prev_id=self.prev_target_id, squad=squad,
         )
+        self.prev_target_id = target.id if target is not None else None
         others = [o for o in enemies if o is not target and
                   (o.sees_us or t - o.t_hit_us <= 3.0 or (o.los and self._dist(me, o) <= 110.0))]
         sit = self.situation(me, target, others, corner_ready)
-        self.mode.update(me, th, z)
-        squad = self.mode.squad()
         gear = self._gear_hunter(me, enemies, squad, sit.unseen_hit)
+        self.isolating = False
         play, calc = D.choose_play(sit, calc if target is not None else None, prev=self.last_play, squad=squad)
         if squad and PF.on("squad_no_break"):
             play = self._lose_rule(me, play, target, calc, enemies, sit, corner_ready)
@@ -702,8 +722,19 @@ class Tactics:
             self.cov.want_hide(me, watchers, t, max_cost=65.0)
             self.cov.want_peek(Target.from_track(target, t, cube_sz).center(), t)
 
+        iso = self.iso.hide_xy() if self.isolating and play in (D.CORNER, D.ASSAULT) else None
+        if iso is not None and not 2.5 < math.hypot(iso[0] - me.pos[0], iso[1] - me.pos[1]) <= ISOLATE_M + 6.0:
+            iso = None
         if gear is not None:
             self._gear(me, obs, dec, gear, slack)
+        elif iso is not None:
+            # lose_isolate: boost to the cell only the target sees, the gun firing on the way
+            self.mv.go(iso, me, z, prefer_cover=False, tag="isolate", replan_dist=2.5)
+            dec.speed = "boost" if me.energy > 20.0 else "walk"
+            dec.evasive = True
+            intent.fire = "long"
+            intent.no_laser_start = True
+            intent.label = "isolate"
         elif play == D.ASSAULT:
             if intent.goal is not None:
                 far = math.hypot(intent.goal[0] - me.pos[0], intent.goal[1] - me.pos[1]) > 110.0

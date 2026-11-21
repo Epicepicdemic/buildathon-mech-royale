@@ -389,6 +389,197 @@ class CrateStallTests(unittest.TestCase):
             sc = bot.tactics.shoot_choice(Me(obs, config()), obs)
             picks.append(sc is not None and sc.id == 1009)
         self.assertTrue(all(picks), picks)
+class CarbonFixTests(unittest.TestCase):
+    """Round table 12, candidate B (brainstorm/r12/mech-carbon.md and mech-neon.md)."""
+
+    def weak(self, dist, weapons):
+        cfg = config()
+        e = Track(9, "mech", 100.0)
+        e.pos = [dist, 0.0, 0.0]
+        e.in_obs, e.los = True, True
+        e.hp, e.max_hp, e.weapons = 450.0, 1400.0, list(weapons)
+        return D.Situation(100.0, (0.0, 0.0), 0.0, 1000, 1400, {"gun": dict(cfg["weapons"]["gun"])}, e, [], cfg=cfg)
+
+    def test_finish_close_never_walks_into_lightning_or_mortar(self):
+        with switch("finish_close", True):
+            self._finish_clamps()
+
+    def test_finish_close_is_off(self):
+        self.assertFalse(PF.on("finish_close"))           # HOUSE-BOTS.md: 84% of expert kills under 78 m
+        self.assertNotEqual(D.Assault().act(self.weak(55.0, ["gun"]), {"calc": None}).spot, "approach")
+
+    def _finish_clamps(self):
+        self.assertNotEqual(D.Assault().act(self.weak(55.0, ["gun", "lightning"]), {"calc": None}).spot, "approach")
+        self.assertNotEqual(D.Assault().act(self.weak(72.0, ["gun", "mortar"]), {"calc": None}).spot, "approach")
+        self.assertEqual(D.Assault().act(self.weak(55.0, ["gun"]), {"calc": None}).spot, "approach")
+
+    def tr(self, tid, x, hp, hit_us=-1e9):
+        e = Track(tid, "mech", 100.0)
+        e.pos = [x, 0.0, 0.0]
+        e.in_obs, e.los, e.sees_us = True, True, True
+        e.hp, e.max_hp, e.weapons, e.yaw = float(hp), 1400.0, ["gun"], math.pi
+        e.t_hit_us = hit_us
+        return e
+
+    def pick(self, a, b, prev, squad):
+        cfg = config()
+        ws = {"gun": dict(cfg["weapons"]["gun"])}
+        fac = lambda e: D.Situation(100.0, (0.0, 0.0), 0.0, 1400, 1400, ws, e, [o for o in (a, b) if o is not e], cfg=cfg)
+        return D.pick_target(fac, [a, b], 100.0, (0.0, 0.0), prev_id=prev, squad=squad)[0]
+
+    def test_sticky_target_survives_a_second_hunters_hit(self):
+        a = self.tr(9, 80.0, 700)                       # the one we are on
+        b = self.tr(10, 70.0, 600, hit_us=99.5)         # a fresh hit from another
+        self.assertIs(self.pick(a, b, prev=None, squad=True), b)
+        self.assertIs(self.pick(a, b, prev=9, squad=True), a)
+        with switch("sticky_target", False):
+            self.assertIs(self.pick(a, b, prev=9, squad=True), b)
+
+    def test_counter_no_stickiness_in_a_free_for_all_crossfire(self):
+        a = self.tr(9, 80.0, 700)
+        b = self.tr(10, 70.0, 600, hit_us=99.5)
+        self.assertIs(self.pick(a, b, prev=9, squad=False), b)     # two shooters in sight
+
+    def test_airborne_enemy_raises_our_gun_dps_in_fightcalc(self):
+        cfg = config()
+        e = self.tr(9, 125.0, 1400)
+        ws = {"gun": dict(cfg["weapons"]["gun"])}
+        s = D.Situation(100.0, (0.0, 0.0), 0.0, 1400, 1400, ws, e, [], cfg=cfg)
+        ground = D.FightCalc(s, e).our_dps
+        e.airborne = True
+        air = D.FightCalc(s, e).our_dps
+        self.assertGreater(air, ground * 1.25)
+        with switch("airborne_aim", False):
+            self.assertAlmostEqual(D.FightCalc(s, e).our_dps, ground)
+
+    def gun_pitch(self, airborne, vz=0.0):
+        cfg = config()
+        w = world()
+        g = Gunner(cfg, w, 1)
+        f = w.floor(*ME)
+        me = Me(zone_obs(self_obs(pos=(ME[0], ME[1], f), t=100.0)), cfg)
+        tr = Track(9, "mech", 100.0)
+        gx = ME[0] + 140.0
+        gf = w.floor(gx, ME[1])
+        tr.pos = [gx, ME[1], gf + 14.0]
+        tr.vel = [0.0, 0.0, vz]
+        tr.airborne, tr.ground = airborne, gf
+        tgt = Target(9, "mech", tuple(tr.pos), tuple(tr.vel), 2.5, 9.0, True, track=tr)
+        return g._gun_aim(me, tgt, me.by_kind["gun"])[1]
+
+    def test_gravity_in_the_lead_of_a_falling_airborne_mech(self):
+        self.assertLess(self.gun_pitch(True), self.gun_pitch(False) - 0.005)    # aims under it
+        self.assertAlmostEqual(self.gun_pitch(True, vz=8.0), self.gun_pitch(False, vz=8.0))  # still jetting up
+
+    def charge_fire(self, vel):
+        cfg = config()
+        w = world()
+        g = Gunner(cfg, w, 1)
+        f = w.floor(*ME)
+        me = Me(zone_obs(self_obs(pos=(ME[0], ME[1], f), t=100.0, aim=[0.0, 0.0],
+                                  weapons=[weapon("gun"), weapon("laser", charge=0.2)])), cfg)
+        tr = Track(9, "mech", 100.0)
+        tr.pos = [ME[0] + 150.0, ME[1], w.floor(ME[0] + 150.0, ME[1])]
+        tr.vel = list(vel)
+        tr.hp, tr.max_hp = 1400.0, 1400.0
+        tr.in_obs = tr.los = True
+        tgt = Target(9, "mech", tuple(tr.pos), tuple(vel), 2.5, 9.0, True, track=tr)
+        it = D.Intent(D.ASSAULT)
+        it.fire = "long"
+        aim, fire, _, _ = g.control(me, it, tgt, [], 0.0, None, [])
+        return aim, fire
+
+    def test_the_torso_stays_on_the_laser_line_and_the_gun_waits_off_its_lead(self):
+        aim, fire = self.charge_fire((0.0, 22.0, 0.0))  # 22 m/s across at 150 m: the lead is ~0.13 rad off
+        self.assertLess(abs(aim[0]), 0.02)              # on the laser's line, not the gun's lead
+        self.assertFalse(fire[0])
+        self.assertTrue(fire[1])
+
+    def test_isolation_hides_from_all_shooters_but_the_target(self):
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.mode.mode = "squad"
+        bot.tactics.gear_done = True
+        for k in range(4):
+            obs = zone_obs(self_obs(pos=(ME[0], ME[1], w.floor(*ME)), t=100.0 + 0.1 * k, hp=900))
+            obs["mechs"] = [enemy(9, ME[0] + 70.0, ME[1], w, math.pi, weapons=("gun",)),
+                            enemy(10, ME[0] + 60.0, ME[1] - 40.0, w, math.atan2(40.0, -60.0), weapons=("gun",))]
+            obs["events"] = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 9}]
+            bot.act(obs)
+        self.assertTrue(bot.tactics.isolating)
+        self.assertIsNotNone(bot.tactics.iso.hide_key)
+        self.assertEqual(len(bot.tactics.iso.hide_key), 1)      # one watcher: the target is not hidden from
+
+
+class HouseBotTests(unittest.TestCase):
+    """analysis/mech/HOUSE-BOTS.md folded into candidate B: measured house accuracy (squad only),
+    floors of 70 m from lightning and 95 m from mortar holders (squad only), the x1.6 laser
+    cook-off on mortar holders and punishing open reloads (both modes)."""
+
+    def e(self, x, weapons, hp=1400.0, tid=9):
+        e = Track(tid, "mech", 100.0)
+        e.pos = [x, 0.0, 0.0]
+        e.in_obs, e.los, e.sees_us = True, True, True
+        e.hp, e.max_hp, e.weapons, e.yaw = hp, 1400.0, list(weapons), math.pi
+        return e
+
+    def sit(self, e, house, weapons=("gun",), others=()):
+        cfg = config()
+        ws = {k: dict(cfg["weapons"][k]) for k in weapons}
+        return D.Situation(100.0, (0.0, 0.0), 0.0, 1400, 1400, ws, e, list(others), cfg=cfg, house=house)
+
+    def test_house_lasers_and_guns_land_little_at_120_m(self):
+        e = self.e(120.0, ["gun", "laser"])
+        house = D.FightCalc(self.sit(e, True), e).their_dps_on_us
+        other = D.FightCalc(self.sit(e, False), e).their_dps_on_us
+        self.assertLess(house, other * 0.5)
+        near = self.e(40.0, ["gun", "laser"])
+        self.assertGreater(D.FightCalc(self.sit(near, True), near).their_dps_on_us, house * 3.0)
+
+    def test_squad_floor_of_70_m_from_a_lightning_holder(self):
+        e = self.e(62.0, ["gun", "lightning"])
+        self.assertEqual(D.Assault().act(self.sit(e, True), {"calc": None}).spot, "retreat")
+        self.assertNotEqual(D.Assault().act(self.sit(e, False), {"calc": None}).spot, "retreat")
+
+    def test_squad_floor_of_95_m_from_a_mortar_holder(self):
+        e = self.e(88.0, ["gun", "mortar"])
+        it = D.Assault().act(self.sit(e, True, weapons=("gun", "laser")), {"calc": None})
+        self.assertIsNone(it.goal)                       # 88 m < 95 m: do not close
+        it = D.Assault().act(self.sit(e, False, weapons=("gun", "laser")), {"calc": None})
+        self.assertIsNotNone(it.goal)                    # free-for-all: laser range 85 m... 75 m floor
+
+    def test_laser_cooks_off_a_mortar_holder(self):
+        plain = self.e(100.0, ["gun"])
+        mort = self.e(100.0, ["gun", "mortar"])
+        a = D.FightCalc(self.sit(plain, False, weapons=("gun", "laser")), plain)
+        b = D.FightCalc(self.sit(mort, False, weapons=("gun", "laser")), mort)
+        self.assertGreater(b.our_dps, a.our_dps * 1.15)
+        with switch("mortar_priority", False):
+            self.assertAlmostEqual(D.FightCalc(self.sit(mort, False, weapons=("gun", "laser")), mort).our_dps, a.our_dps)
+
+    def pick(self, a, b, weapons=("gun",)):
+        cfg = config()
+        ws = {k: dict(cfg["weapons"][k]) for k in weapons}
+        fac = lambda e: D.Situation(100.0, (0.0, 0.0), 0.0, 1400, 1400, ws, e, [o for o in (a, b) if o is not e], cfg=cfg)
+        return D.pick_target(fac, [a, b], 100.0, (0.0, 0.0), squad=True)[0]
+
+    def test_mortar_holders_come_first_with_a_laser(self):
+        a = self.e(80.0, ["gun"], tid=9)
+        b = self.e(90.0, ["gun", "mortar"], tid=10)
+        self.assertIs(self.pick(a, b, weapons=("gun", "laser")), b)
+
+    def test_a_target_reloading_in_the_open_comes_first(self):
+        a = self.e(80.0, ["gun"], tid=9)
+        b = self.e(90.0, ["gun"], tid=10)
+        self.assertIs(self.pick(a, b), a)
+        b.t_reload_heard = 99.5
+        self.assertIs(self.pick(a, b), b)
+        e = self.e(60.0, ["gun"])
+        fresh = D.FightCalc(self.sit(e, True), e).their_dps_on_us
+        fresh_ffa = D.FightCalc(self.sit(e, False), e).their_dps_on_us
+        e.t_reload_heard = 99.5
+        self.assertLess(D.FightCalc(self.sit(e, True), e).their_dps_on_us, fresh * 0.5)
+        self.assertAlmostEqual(D.FightCalc(self.sit(e, False), e).their_dps_on_us, fresh_ffa)   # free-for-all: unchanged
 
 
 if __name__ == "__main__":

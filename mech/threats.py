@@ -17,7 +17,8 @@ class Track:
     __slots__ = ("id", "kind", "pos", "vel", "yaw", "pitch", "hp", "max_hp", "cubes", "weapons", "charging",
                  "t_seen", "t_first", "in_obs", "los", "sees_us", "dead", "phantom", "hist", "dmg_to_us",
                  "t_hit_us", "t_we_hit", "dmg_from_us", "t_hp_drop_other", "t_fired_other", "t_heard",
-                 "heard_kind", "home", "aggro", "t_reload_heard", "hp_prev", "t_fired", "t_fired_mech")
+                 "heard_kind", "home", "aggro", "t_reload_heard", "hp_prev", "t_fired", "t_fired_mech",
+                 "airborne", "ground")
 
     def __init__(self, tid, kind, t):
         self.id = tid
@@ -54,6 +55,8 @@ class Track:
                                       # path passes one): only a free-for-all produces this
         self.hp_prev = None
         self.t_fired = -1e9
+        self.airborne = False         # more than 0.45 m above the ground or roof under it
+        self.ground = None            # that ground's height
 
     # ------------------------------------------------------------------ estimates
     def age(self, t):
@@ -206,6 +209,17 @@ class Threats:
         return [tr for tr in self.tracks.values() if tr.kind == "npc" and not tr.dead]
 
     # ------------------------------------------------------------------ update
+    def _ground(self, p):
+        """Height of the ground (or standable roof) under p, or None without a world."""
+        if self.w is None:
+            return None
+        try:
+            f = self.w.floor(p[0], p[1])
+            r = self.w.roof_at(p[0], p[1])
+        except (IndexError, ValueError):
+            return None
+        return r if r is not None and p[2] >= r - 0.45 else f
+
     def update(self, obs, me):
         t = me.t
         self.t = t
@@ -231,6 +245,9 @@ class Threats:
             tr.pos = [float(p[0]), float(p[1]), float(p[2])]
             v = m.get("vel") or (0, 0, 0)
             tr.vel = [float(v[0]), float(v[1]), float(v[2])]
+            if kind == "mech":
+                tr.ground = self._ground(tr.pos)
+                tr.airborne = tr.ground is not None and tr.pos[2] > tr.ground + 0.45
             a = m.get("aim") or (tr.yaw, tr.pitch)
             tr.yaw, tr.pitch = float(a[0]), float(a[1])
             if m.get("hp") is not None:
