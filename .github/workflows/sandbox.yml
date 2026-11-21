@@ -7,3 +7,13 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build --platform linux/amd64 -t mech-royale .
       - run: python3 check/check.py --map-dir /arena -- docker run --rm -i --network none --cpus 1 --memory 512m --read-only --tmpfs /tmp:rw,size=64m --user 65534:65534 -v "$PWD/arena:/arena:ro" mech-royale
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.9"
+      - run: pip install numpy==2.3.5
+      - run: python tools/build_world.py arena worlddata/world.bin
+      - run: python -m unittest discover -s tests -t . -v

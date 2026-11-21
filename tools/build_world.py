@@ -440,6 +440,8 @@ def build(arena, out):
         blobs.append(raw)
         off += len(raw)
     hdr = json.dumps(meta, separators=(",", ":")).encode()
+    import os
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     with open(out, "wb") as f:
         f.write(b"MRW2")
         f.write(struct.pack("<I", len(hdr)))

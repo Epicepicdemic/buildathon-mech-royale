@@ -4,6 +4,7 @@ Per decision: parse, update threat memory and the zone, decide (tactics + doctri
 remaining budget on searches (zone field, routes, cover), then steer the legs and the torso.
 Long searches are resumable, so no decision waits for one to finish.
 """
+import gc
 import math
 import sys
 import time
@@ -41,8 +42,12 @@ class Bot:
         self.gunner = Gunner(self.cfg, self.world, self.seed)
         self.tactics = Tactics(self.world, self.cfg, self.mover, self.cover, self.threats, self.zone, self.seed)
         self.decisions = 0
+        self.prev_charge = 0.0
         self.worst_ms = 0.0
         self.last_label = ""
+        # Move everything loaded so far out of the collector's way (measured pauses stay under 1 ms).
+        gc.collect()
+        gc.freeze()
 
     def act(self, obs):
         t0 = time.perf_counter()
@@ -63,9 +68,24 @@ class Bot:
         os_ = self.tactics.opening_search
         if os_ is not None and not os_.done:
             os_.run(end)
-        # ---- legs
-        move, boost, jump = self.mover.steer(me, self.zone, dec.speed, dec.evasive, dec.threat_yaw, dec.hold,
-                                             shells=self.threats.projectiles)
+        # ---- legs: an air manoeuvre, a straight walk on a roof, or the mover
+        laser = me.by_kind.get("laser")
+        released = self.prev_charge > 0 and (laser is None or laser.charge == 0)
+        self.prev_charge = laser.charge if laser is not None else 0.0
+        airp = self.tactics.air
+        if airp is not None and not airp.done:
+            if hasattr(airp, "at_height"):
+                move, boost, jump, done = airp.step(me, laser_released=released)
+            else:
+                move, boost, jump, done = airp.step(me)
+        elif dec.direct is not None:
+            dx, dy = dec.direct[0] - me.pos[0], dec.direct[1] - me.pos[1]
+            d = math.hypot(dx, dy)
+            move = [dx / d, dy / d] if d > 0.8 else [0.0, 0.0]
+            boost, jump = False, False
+        else:
+            move, boost, jump = self.mover.steer(me, self.zone, dec.speed, dec.evasive, dec.threat_yaw, dec.hold,
+                                                 shells=self.threats.projectiles)
         move_yaw = math.atan2(move[1], move[0]) if math.hypot(move[0], move[1]) > 0.3 else None
         # ---- torso and triggers
         obstacles = [tr for tr in self.threats.tracks.values() if tr.in_obs and not tr.dead]

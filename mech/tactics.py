@@ -5,6 +5,7 @@ The same rules run in every match. Nothing here tries to tell practice from the 
 """
 import math
 
+from . import air as A
 from . import doctrine as D
 from .cover import LowExposureSearch
 from .geom import angdiff, bearing, wrap
@@ -33,6 +34,7 @@ class Decision:
         self.threat_yaw = None
         self.hold = False
         self.label = ""
+        self.direct = None          # walk straight to this point (roofs have no grid)
 
 
 class Tactics:
@@ -63,6 +65,10 @@ class Tactics:
         self.npc_ban = {}
         self.loot_note = ""
         self.last_harass_hit = -1e9
+        self.air = None              # the air play in progress (mech/air.py)
+        self.roof_mode = False       # we mean to be on a roof
+        self.roof_spots = None       # (peek, hide, t) on the roof
+        self.air_ban_until = -1e9
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -329,8 +335,12 @@ class Tactics:
         self.healing = False
         if target is not None:
             dec.target = Target.from_track(target, t, float((self.cfg.get("cubes") or {}).get("size_per_cube", 0.05)))
-        # ---------------- per play movement
+        # ---------------- the air: a manoeuvre in progress, or one worth starting
         watchers = self.watchers(me)
+        if self._air(me, obs, dec, play, target, calc, enemies, slack):
+            dec.label = "air: " + self.air.name if self.air is not None else (intent.label or "")
+            return dec
+        # ---------------- per play movement
         # keep a corner against the primary enemy ready, whatever the play, so the doctrine can use it
         if target is not None and play != D.REPOSITION:
             self.cov.want_hide(me, watchers, t, max_cost=60.0)
@@ -448,16 +458,8 @@ class Tactics:
                     self.opening_done = True
                 intent.label = "opening: searching"
                 return
-        # 2. after a kill: move, the squad shares what it sees
-        if t < self.relocate_until and watchers:
-            self.cov.want_hide(me, watchers, t, max_cost=110.0, away_from=self.relocate_from, min_dist=30.0)
-            hide = self.cov.hide_xy()
-            if hide is not None:
-                self.mv.go(hide, me, z, prefer_cover=False, tag="relocate", replan_dist=4.0)
-                intent.label = "relocate"
-                dec.speed = "walk"
-                return
-        # 3. cubes and weapons lying nearby when nobody is on us (walking does not stop healing)
+        # 2. cubes and weapons lying nearby when nobody is on us (walking does not stop healing),
+        #    including the cubes a kill drops, before we move on
         near_active = [tr for tr in self.th.active_mechs(t, 6.0) if self._dist(me, tr) < 90.0]
         safe = not near_active and t - self.th.t_taken > 5.0 and not any(tr.sees_us for tr in self.th.mechs())
         if safe and slack > 15.0:
@@ -471,6 +473,15 @@ class Tactics:
                 self.mv.go(pos, me, z, prefer_cover=False, tag="loot-%s" % lid, replan_dist=2.0)
                 dec.speed = "walk"
                 intent.label = "loot"
+                return
+        # 3. after a kill: move, the squad shares what it sees
+        if t < self.relocate_until and watchers:
+            self.cov.want_hide(me, watchers, t, max_cost=110.0, away_from=self.relocate_from, min_dist=30.0)
+            hide = self.cov.hide_xy()
+            if hide is not None:
+                self.mv.go(hide, me, z, prefer_cover=False, tag="relocate", replan_dist=4.0)
+                intent.label = "relocate"
+                dec.speed = "walk"
                 return
         # 4. heal: stay out of sight, hold fire
         want_heal = me.hp_frac < 0.93 and me.in_zone and slack > 12.0
@@ -519,6 +530,128 @@ class Tactics:
         if self.mv.arrived(me):
             dec.face = self.lookout_yaw(me)
             dec.hold = True
+
+    # ------------------------------------------------------------------ the air
+    def _air(self, me, obs, dec, play, target, calc, enemies, slack):
+        """Start or continue an air play, and fight from a roof. True when it decides the legs."""
+        t = me.t
+        w = self.w
+        z = self.zone
+        intent = dec.intent
+        mech_cfg = self.cfg.get("mech", {})
+        on_roof = me.grounded and w.roof_at(me.pos[0], me.pos[1]) is not None and \
+            me.pos[2] > w.floor(me.pos[0], me.pos[1]) + 4.0
+        final_roof = None
+        if z.next_radius <= 25.0:
+            final_roof = A.LastCircleRoof.find(w, me, z.next_center, max(z.next_radius, 6.0), mech_cfg)
+        # a manoeuvre in progress keeps the legs until it is done
+        if self.air is not None:
+            if self.air.done:
+                if isinstance(self.air, A.DropAttack):
+                    self.roof_mode = False
+                self.air = None
+            else:
+                self.mv.clear()
+                self.mv.allow_roof = True
+                if isinstance(self.air, A.PopUp):
+                    intent.fire = "long"
+                    intent.spot = "peek"
+                return True
+        # 1. last circle closing on a building: get onto that roof
+        if final_roof is not None and t >= self.air_ban_until:
+            fx, fy, fh = final_roof
+            if on_roof and abs(me.pos[2] - fh) < 1.5:
+                self.roof_mode = True
+                self.mv.allow_roof = True
+                if math.hypot(fx - me.pos[0], fy - me.pos[1]) > 2.0:
+                    dec.direct = (fx, fy)
+                intent.label = "last circle: roof"
+                return True
+            hop = A.WallHop.find(w, me, max_climb=56.0, cfg_mech=mech_cfg, reach=14.0)
+            if hop is not None and abs(hop[2] - fh) < 1.5:
+                self.air = A.WallHop()
+                self.air.start(t, hop)
+                self.roof_mode = True
+                return True
+        # 2. on a roof on purpose: fight from its edge, drop onto someone, or come down
+        if self.roof_mode and on_roof:
+            self.mv.allow_roof = True
+            leave = slack < 20.0 and final_roof is None
+            if target is not None and not leave:
+                tp = target.est_pos(t)
+                light = me.by_kind.get("lightning")
+                if light is not None and calc is not None and (calc.ratio >= 1.0 or calc.finishable) and \
+                        play in (D.ASSAULT, D.CORNER):
+                    land = A.DropAttack.find(w, me, tp, target.yaw, light.stat("range", 45.0))
+                    if land is not None:
+                        self.air = A.DropAttack()
+                        self.air.start(t, land, me.pos[2])
+                        return True
+                if self.roof_spots is None or t - self.roof_spots[2] > 1.5:
+                    res = A.RoofEdge.find(w, me, (tp[0], tp[1], tp[2] + 4.5))
+                    self.roof_spots = (res[0], res[1], t) if res else None
+                if self.roof_spots is not None and play in (D.CORNER, D.ASSAULT, D.HARASS, D.BREAK):
+                    peek, hide = self.roof_spots[0], self.roof_spots[1]
+                    gun = me.by_kind.get("gun")
+                    ready = gun is None or (gun.reload <= 0 and (gun.ammo or 0) > 2)
+                    hurt = self.expose_hp is not None and self.expose_hp - me.hp > 0.2 * me.max_hp
+                    if play == D.BREAK or not ready or hurt:
+                        dec.direct = hide
+                        intent.fire = "none"
+                        intent.reload_ok = True
+                        intent.label = "roof: back"
+                    else:
+                        dec.direct = peek
+                        intent.fire = "long"
+                        intent.label = "roof: edge"
+                    self.mv.clear()
+                    return True
+            if not leave and (me.hp_frac < 0.93 or target is not None):
+                # heal up here, out of reach of ground bots
+                dec.hold = True
+                intent.fire = "none" if target is None else intent.fire
+                intent.label = "roof: heal"
+                self.mv.clear()
+                return True
+            # done with the roof: walk off its edge (the mover's island escape)
+            self.roof_mode = False
+            self.mv.allow_roof = False
+            return False
+        if not on_roof:
+            self.roof_mode = self.roof_mode and self.air is not None
+            self.mv.allow_roof = False
+        if t < self.air_ban_until or not me.grounded:
+            return False
+        # 3. laser pop-up from behind a wall
+        laser = me.by_kind.get("laser")
+        if laser is not None and target is not None and play in (D.ASSAULT, D.CORNER, D.HARASS) and not target.los \
+                and not any(e.sees_us for e in enemies) and laser.cooldown <= 0.1 and t - target.t_seen < 3.0:
+            tp = target.est_pos(t)
+            d = math.hypot(tp[0] - me.pos[0], tp[1] - me.pos[1])
+            if 40.0 <= d <= laser.stat("range", 280.0) * 0.9:
+                rise = A.PopUp.find(w, me, (tp[0], tp[1], tp[2] + 4.5), A.PopUp.MAX_RISE, mech_cfg)
+                if rise is not None:
+                    self.air = A.PopUp()
+                    self.air.start(t, rise)
+                    self.air_ban_until = t + 6.0
+                    intent.fire = "long"
+                    intent.spot = "peek"
+                    return True
+        # 4. wall hop away from a pursuer when there is no cover on the ground nearby
+        if play == D.BREAK and target is not None and target.sees_us:
+            tp = target.est_pos(t)
+            d = math.hypot(tp[0] - me.pos[0], tp[1] - me.pos[1])
+            hide = self.cov.hide_xy()
+            far_hide = hide is None or math.hypot(hide[0] - me.pos[0], hide[1] - me.pos[1]) > 25.0
+            if d < 80.0 and far_hide and slack > 30.0:
+                hop = A.WallHop.find(w, me, away_from=(tp[0], tp[1]), cfg_mech=mech_cfg)
+                if hop is not None:
+                    self.air = A.WallHop()
+                    self.air.start(t, hop)
+                    self.roof_mode = True
+                    self.air_ban_until = t + 10.0
+                    return True
+        return False
 
     def drop_choice(self, me, obs):
         z = self.zone

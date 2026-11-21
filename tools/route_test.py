@@ -141,11 +141,12 @@ def run(n_cases=500, seed=7828, sim=True, verbose=False):
         deadline = ph["shrink_end"]
         ncx, ncy = ph["next_center"]
         rs = max(2.0, ph["next_radius"] - SAFE_MARGIN)
-        field = nav.ZoneField(w, ncx, ncy, rs)
+        # the bot's field: walking outside the current circle costs more
+        field = nav.ZoneField(w, ncx, ncy, rs, stay=(cx, cy, max(1.0, r - 4.0)))
         field.run(1e18)
-        fast_d = field.cost(n0)
-        if fast_d == math.inf:
+        if field.cost(n0) == math.inf:
             continue
+        fast_d = nav.path_length(w, field.path(n0))
         stats["cases"] += 1
         feasible = now + mob.time_fast(fast_d * routing.PATH_FACTOR, energy) <= deadline
         goal = pick_goal(w, field, (sx, sy), ph)

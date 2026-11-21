@@ -103,8 +103,11 @@ class KMech:
         else:
             self.vx = self.vy = 0.0
             self.blocked_ticks += 1
-        # vertical
+        # vertical: stand on the floor, or on top of a prism when we are above it (roofs)
         f = self.w.floor(self.x, self.y)
+        top = self.w.sight(self.x, self.y)
+        if top > f + self.step and self.z >= top - 0.6:
+            f = top
         if self.grounded:
             if f < self.z - 0.6:
                 self.grounded = False

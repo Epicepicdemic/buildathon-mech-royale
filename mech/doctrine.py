@@ -24,6 +24,7 @@ ASSAULT_RATIO = 1.5
 EVEN_RATIO = 0.8
 NEAR_OTHERS_M = 160.0
 HYST = 0.2
+CORNER_TAKE = 0.85      # from a corner we fight unless the calculation says we clearly lose
 
 
 # ---------------------------------------------------------------------------- weapon numbers
@@ -408,7 +409,8 @@ def choose_play(sit, calc=None, prev=None):
     e_thr = EVEN_RATIO - (HYST if prev in (CORNER, ASSAULT) else 0.0) + (HYST if prev == BREAK else 0.0)
     if calc.ratio >= a_thr or (calc.finishable and calc.ratio >= 1.0):
         return ASSAULT, calc
-    if calc.ratio >= e_thr or (sit.corner and calc.ratio_corner >= 1.0 + (HYST if prev == BREAK else 0.0)):
+    # from cover, a roughly even fight is taken: hunters come anyway, and running shows them our back
+    if calc.ratio >= e_thr or (sit.corner and calc.ratio_corner >= CORNER_TAKE + (HYST if prev == BREAK else 0.0)):
         return CORNER, calc
     if retreating(sit, e) and sit.long_sight and calc.dist <= 230.0:
         return HARASS, calc

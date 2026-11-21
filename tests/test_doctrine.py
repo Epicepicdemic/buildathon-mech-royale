@@ -94,6 +94,31 @@ class ChoosePlayTests(unittest.TestCase):
         self.assertEqual(D.choose_play(s, calc, prev=D.CORNER)[0], D.CORNER)
 
 
+class HunterTests(unittest.TestCase):
+    """A single hunter coming at a healthy bot in cover is fought, not fled (team lead's case)."""
+
+    def approaching(self, weapons=("gun",), dist=90.0):
+        # coming straight at us from the east, looking at us
+        return track(pos=(dist, 0.0, 0.0), vel=(-11.7, 0.0, 0.0), yaw=math.pi, weapons=weapons, sees_us=True)
+
+    def test_single_gun_hunter_is_fought_from_cover(self):
+        for d in (150.0, 90.0, 60.0, 30.0):
+            play, calc = D.choose_play(sit(self.approaching(dist=d), corner=True))
+            self.assertIn(play, (D.CORNER, D.ASSAULT), (d, play, calc.ratio, calc.ratio_corner))
+
+    def test_laser_hunter_is_fought_from_cover(self):
+        play, calc = D.choose_play(sit(self.approaching(("gun", "laser"), 110.0), corner=True))
+        self.assertIn(play, (D.CORNER, D.ASSAULT), (play, calc.ratio, calc.ratio_corner))
+
+    def test_hunter_with_our_laser_is_assaulted(self):
+        play, calc = D.choose_play(sit(self.approaching(dist=100.0), kinds=("gun", "laser"), corner=True))
+        self.assertEqual(play, D.ASSAULT, calc.ratio)
+
+    def test_hurt_bot_still_breaks_from_a_losing_fight(self):
+        play, calc = D.choose_play(sit(self.approaching(("gun", "laser"), 110.0), hp=380, corner=True))
+        self.assertEqual(play, D.BREAK)
+
+
 class TargetChoiceTests(unittest.TestCase):
     def test_prefers_weak_close_and_busy(self):
         strong_far = track(5, pos=(180, 0, 0), hp=1400)
