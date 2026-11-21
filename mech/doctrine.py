@@ -237,6 +237,7 @@ class Intent:
         self.hold = False           # stand still
         self.cover_near = True      # a hidden cell one step away (long bursts at range need it)
         self.no_laser_start = False # keep full 1.0x walk/boost speed during fighting retreats
+        self.under_fire = False     # a mech has a line of fire on us: no early reload
         self.label = play
 
 

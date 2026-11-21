@@ -154,8 +154,10 @@ class LootTests(unittest.TestCase):
         a = self._take(["mortar"])
         self.assertNotIn("take", a)
 
-    def test_swaps_lightning_for_a_laser(self):
+    def test_keeps_lightning_and_drops_the_gun_for_a_laser(self):
+        """Candidate 1 (main's rule, the chair Sat 07:20): laser and lightning are held together,
+        so with gun + lightning full it is the gun that goes for a laser, not the lightning."""
         from tests.helpers import weapon
         a = self._take(["laser"], weapons=[weapon("gun"), weapon("lightning")])
         self.assertEqual(a.get("take"), 8000)
-        self.assertEqual(a.get("drop"), 1)
+        self.assertEqual(a.get("drop"), 0)

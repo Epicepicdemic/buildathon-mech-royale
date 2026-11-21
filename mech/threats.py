@@ -126,6 +126,11 @@ class Track:
     def still(self):
         return math.hypot(self.vel[0], self.vel[1]) < 1.5
 
+    def shootable(self):
+        """In the observation with nothing solid between our muzzle and it (line B's `los` is shot
+        clearance, so trees do not block it)."""
+        return self.in_obs and self.los
+
     def recently_hit_us(self, t, window=3.0):
         return t - self.t_hit_us <= window
 

@@ -243,7 +243,8 @@ class Gunner:
             mag = gun.stat("mag", 12.0)
             if gun.ammo == 0:
                 reload = True
-            elif intent is not None and intent.reload_ok and gun.ammo < mag * 0.65 and not fire[gun.slot]:
+            elif intent is not None and intent.reload_ok and gun.ammo < mag * 0.65 and not fire[gun.slot] \
+                    and not getattr(intent, "under_fire", False):
                 reload = True
         if gun is not None and fire[gun.slot]:
             reload = False

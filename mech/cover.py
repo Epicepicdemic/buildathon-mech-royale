@@ -91,13 +91,33 @@ class PeekSearch(nav.NearestSearch):
         super().__init__(world, hide_node, pred, max_cost, alts=3 if rng is not None else 1, alt_slack=4.0, rng=rng)
 
 
+class IsolateSearch(nav.NearestSearch):
+    """Nearest walkable node hidden from every attacker but one, with a shot at that one: against
+    a squad that spreads round us (the red team's pincer keeps one bot behind whatever we face),
+    fight them one at a time from a spot the others cannot see."""
+
+    def __init__(self, world, start, primary_center, others, max_cost=45.0, height=9.0):
+        others = list(others)
+
+        def pred(n):
+            if not world.main[n]:
+                return False
+            if world.clear_dm[world.vidx(*world.node_xy(n))] < 33:
+                return False
+            if not hidden_at(world, n, others, height):
+                return False
+            return shot_from(world, n, primary_center) and sees_target(world, n, primary_center)
+
+        super().__init__(world, start, pred, max_cost)
+
+
 class LowExposureSearch(nav.NearestSearch):
     """Nearest node with low exposure and walls close around (the opening when nothing is known)."""
 
-    def __init__(self, world, start, max_expo=0.10, min_arc=0.25, max_cost=140.0):
+    def __init__(self, world, start, max_expo=0.10, min_arc=0.25, max_cost=140.0, rng=None):
         def pred(n):
             return world.main[n] and world.expo[n] <= max_expo * 255 and world.wall_arc(n) >= min_arc
-        super().__init__(world, start, pred, max_cost)
+        super().__init__(world, start, pred, max_cost, alts=4 if rng is not None else 1, alt_slack=14.0, rng=rng)
 
 
 class CoverState:

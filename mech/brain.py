@@ -63,7 +63,7 @@ class Bot:
         end = t0 + WORK_BUDGET_S
         self.mover.work(me, self.zone, end - 0.0012)
         self.cover.run(end - 0.0004)
-        for srch in (self.tactics.opening_search, self.tactics.second_search):
+        for srch in (self.tactics.opening_search, self.tactics.second_search, self.tactics.iso_search):
             if srch is not None and not srch.done and time.perf_counter() < end:
                 srch.run(end)
         # ---- legs: an air manoeuvre, a straight walk on a roof, or the mover
@@ -87,8 +87,10 @@ class Bot:
                 move = [dx / d, dy / d] if d > 0.8 else [0.0, 0.0]
                 boost, jump = False, False
         else:
+            exposed = any(tr.sees_us for tr in self.threats.tracks.values()
+                          if tr.in_obs and tr.kind == "mech" and not tr.dead)
             move, boost, jump = self.mover.steer(me, self.zone, dec.speed, dec.evasive, dec.threat_yaw, dec.hold,
-                                                 shells=self.threats.projectiles)
+                                                 shells=self.threats.projectiles, exposed=exposed)
         move_yaw = math.atan2(move[1], move[0]) if math.hypot(move[0], move[1]) > 0.3 else None
         if dec.face is None and dec.target is None:
             dec.face = self.tactics.patrol_yaw(me, move_yaw)
@@ -132,14 +134,9 @@ class Bot:
                 continue
             pp = p.get("pos")
             if math.hypot(pp[0] - me.pos[0], pp[1] - me.pos[1]) <= reach - 0.2 and abs(pp[2] - me.pos[2]) <= 3.8:
-                if me.slots_free:
-                    return p["id"], None
-                mort = me.by_kind.get("mortar")
-                if mort is not None:
-                    return p["id"], mort.slot
-                light = me.by_kind.get("lightning")
-                if k == "laser" and light is not None and light.cooldown <= 0.2:
-                    return p["id"], light.slot
+                drop = self.tactics._swap_slot(me, k)
+                if drop is not False:
+                    return p["id"], drop
         return None, None
 
 

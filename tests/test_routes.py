@@ -22,6 +22,39 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(stats["stuck_events"], 0)
 
 
+class HopTests(unittest.TestCase):
+    """The dead end beside RPAC (sandbox seed 4): the next circle is 90 m south behind the PAES/RPAC
+    complex and the only walk out is a 1.5 km loop north. Version 2 took it and died in the zone.
+    With hop edges the route goes up onto the 6.5 m roof, across and off it."""
+
+    def test_rpac_pocket_hops_and_arrives(self):
+        import math
+        from tests.helpers import world
+        from mech import nav, routing
+        w = world()
+        circle = (-84.75, -188.44, 22.0)
+        stay = (-77.84, -149.69, 66.0)
+        zf = nav.ZoneField(w, *circle, stay=stay)
+        zf.run(1e18)
+        walk = nav.ZoneField(w, *circle, stay=stay, use_hops=False)
+        walk.run(1e18)
+        s = w.nearest_free(-101.3, -98.7, 6)
+        self.assertGreater(walk.cost(s), 1000.0)
+        self.assertLess(zf.cost(s), 200.0)
+        nodes = zf.path(s)
+        self.assertEqual(route_test.validate_nodes(w, nodes), [])
+        e = routing.enter_length(w, nodes, *circle)
+        route = routing.Route(w, nodes, "zone", False, e, e)
+        self.assertTrue(route.hops)
+        mob = routing.Mobility(route_test.load_config()["mech"])
+        ph = dict(center=stay[:2], radius=70.0, next_center=circle[:2], next_radius=25.0,
+                  shrink_start=350.0, shrink_end=375.0)
+        arrive, outside, stuck, _ = route_test.simulate(w, route, mob, 327.0, 375.0, circle, ph, energy=80.0)
+        self.assertIsNotNone(arrive)
+        self.assertLess(arrive, 350.0)
+        self.assertEqual(outside, 0.0)
+
+
 class FollowerTests(unittest.TestCase):
     def test_follower_cuts_corners_where_walkable(self):
         from tests.helpers import world

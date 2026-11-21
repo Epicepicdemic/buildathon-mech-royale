@@ -8,7 +8,7 @@ import math
 import random
 import time
 
-from . import nav, routing
+from . import dodge, nav, routing
 from .geom import unit, wrap
 
 INF = float("inf")
@@ -36,6 +36,12 @@ class Mover:
         self.booster = routing.Booster()
         self.jink_sign = 1
         self.jink_until = 0.0
+        self.jinker = dodge.Jinker(random.Random(seed ^ 0x51DE))   # long legs (main, mech/dodge.py)
+        self.exposed = False
+        self.last_move = None
+        self.hop = None               # routing.Hop in flight (jump-and-jet route edges, main)
+        self.hop_fol = None
+        self.hops_banned = 0
         self.anchor = None
         self.escape = None
         self.note = ""
@@ -102,7 +108,7 @@ class Mover:
     # ------------------------------------------------------------------ goals
     def _set_route(self, route, goal, tag):
         self.route = route
-        self.fol = routing.Follower(self.w, route.pts, route.cum)
+        self.fol = routing.Follower(self.w, route.pts, route.cum, hops=route.hops)
         self.goal = goal
         self.goal_tag = tag
         self.stuck.reset()
@@ -156,8 +162,10 @@ class Mover:
         return self.fol.finished(me.pos[0], me.pos[1], tol)
 
     # ------------------------------------------------------------------ steering
-    def steer(self, me, zone, speed="walk", evasive=False, threat_yaw=None, hold=False, shells=()):
-        """(move [x, y], boost, jump) for this decision."""
+    def steer(self, me, zone, speed="walk", evasive=False, threat_yaw=None, hold=False, shells=(), exposed=False):
+        """(move [x, y], boost, jump) for this decision. `exposed`: an enemy can see us now, so
+        stuck recovery may hop but must not jet (a mech hanging in the air is the easiest target)."""
+        self.exposed = exposed
         w = self.w
         x, y = me.pos[0], me.pos[1]
         t = me.t
@@ -166,17 +174,24 @@ class Mover:
         jump = False
         move = (0.0, 0.0)
         self.urgent = False
+        # 0. a hop in flight keeps the legs until it lands
+        if self.hop is not None:
+            res = self._fly_hop(me)
+            if res is not None:
+                return res
         # 1. islands: low roofs, the stadium bowl, anywhere the grid says we cannot walk out
+        #    (unless a route with hops is taking us across one)
         nf = w.nearest_free(x, y, 3)
         on_island = nf is None or not w.main[nf]
-        if on_island and not self.allow_roof:
+        crossing = self.route is not None and bool(self.route.hops)
+        if on_island and not self.allow_roof and not crossing:
             esc = self._escape_target(x, y)
             if esc is not None:
                 dx, dy = esc[0] - x, esc[1] - y
                 move = unit(dx, dy)
                 st = self.stuck.update(t, x, y, True)
                 jump = me.grounded and (st >= 1 or self._blocked_ahead(x, y, move))
-                boost = (not me.grounded) and me.energy > 3
+                boost = (not me.grounded) and me.energy > 3 and self._jet_needed(me, move)
                 self.note = "escape island"
                 return [move[0], move[1]], boost, jump
         # 2. urgency: outside the zone or about to be caught: fastest path, boost
@@ -197,7 +212,13 @@ class Mover:
             path = active_zf.path(w.nearest_free(x, y, 4) or n, 40) if active_zf is not None else []
             if len(path) > 1:
                 pts = nav.path_points(w, path)
-                fol = routing.Follower(w, pts)
+                zhops = routing.route_hops(w, path)
+                fol = routing.Follower(w, pts, hops=zhops)
+                k = fol.hop_due(x, y)
+                if k is not None and k in zhops:
+                    res = self._start_hop(me, fol, k, zhops[k])
+                    if res is not None:
+                        return res
                 tx, ty, rem, off = fol.target(x, y)
                 move = unit(tx - x, ty - y)
             else:
@@ -217,14 +238,26 @@ class Mover:
             if sdodge is not None:
                 move = unit(move[0] * 0.45 + sdodge[0] * 0.85, move[1] * 0.45 + sdodge[1] * 0.85)
             boost = self.booster.want(True, me.energy)
+            self.last_move = move
             st = self.stuck.update(t, x, y, True)
             jump, boost = self._unstick(st, me, jump, boost)
+            if not me.grounded and boost and not self._jet_needed(me, move):
+                boost = False       # in the air, boosting is jetting: only to clear a ledge
             self.note = "zone run"
             return [move[0], move[1]], boost, jump
         # 3. follow the route (or step toward a pending goal while the planner finishes)
         commanded = False
+        if self.fol is not None and not hold and self.route is not None:
+            k = self.fol.hop_due(x, y)
+            if k is not None and k in self.route.hops:
+                res = self._start_hop(me, self.fol, k, self.route.hops[k])
+                if res is not None:
+                    return res
         if self.fol is not None and not hold:
             tx, ty, rem, off = self.fol.target(x, y)
+            if me.grounded and self.route is not None and self.goal is not None and \
+                    abs(w.floor(tx, ty) - me.pos[2]) > 2.5 and self.fol.hop_due(x, y) is None:
+                off = 99.0          # off a roof the route crosses: plan again from here
             if off > 10.0 and self.route is not None and self.goal is not None:
                 # knocked off the route: plan again from here
                 self.replans += 1
@@ -278,6 +311,7 @@ class Mover:
             f = min(1.0, self.mob.silent / max(self.mob.walk, 0.1))
             move = (move[0] * f, move[1] * f)
         boost = self.booster.want(speed == "boost" and math.hypot(*move) > 0.5, me.energy)
+        self.last_move = move
         st = self.stuck.update(t, x, y, commanded)
         if st >= 3 and self.goal is not None:
             # replan from where we are, after a sidestep
@@ -289,14 +323,76 @@ class Mover:
             self.stuck.reset()
             self.replans += 1
         jump, boost = self._unstick(st, me, jump, boost)
+        if boost and not me.grounded and not self._jet_needed(me, move):
+            # in the air the boost button is the jets: running speed is not wanted up there
+            boost = False
         return [move[0], move[1]], boost, jump
 
     def _unstick(self, st, me, jump, boost):
         if st >= 1 and me.grounded:
             jump = True
-        if st >= 2 and not me.grounded and me.energy > 5:
-            boost = True
+        if st >= 2 and not me.grounded and me.energy > 5 and not self.exposed:
+            mv = self.last_move if self.last_move is not None else (math.cos(me.yaw), math.sin(me.yaw))
+            if self._jet_needed(me, mv):
+                boost = True
         return jump, boost
+
+    def _jet_needed(self, me, move, look=4.0, max_climb=14.0):
+        """Jet only while the feet are below the top of what is in front of us, and only when that
+        top is low enough to clear (main: version 2 jetted while stuck and rose 20-36 m in view)."""
+        mx, my = move[0], move[1]
+        nrm = math.hypot(mx, my)
+        if nrm < 0.2:
+            return False
+        mx, my = mx / nrm, my / nrm
+        x, y = me.pos[0], me.pos[1]
+        top = -1e9
+        for k in range(1, int(look) + 1):
+            top = max(top, self.w.sight(x + mx * (me.radius + k * 0.75), y + my * (me.radius + k * 0.75)))
+        if top - me.pos[2] > max_climb:
+            return False
+        return me.pos[2] < top + 0.8
+
+    # ------------------------------------------------------------------ hops (main, acc464a..ed0094b)
+    def _start_hop(self, me, fol, k, info):
+        """At the launch point of hop k: start it (or wait for the energy it needs)."""
+        climb = info.top > me.pos[2] + 0.6
+        if climb and me.energy < info.energy:
+            self.note = "hop: waiting for energy"
+            return [0.0, 0.0], False, False
+        self.hop = routing.Hop(me.t, fol.pts[k], fol.pts[k + 1], info, self.w)
+        self.hop_fol = fol
+        return self._fly_hop(me)
+
+    def _fly_hop(self, me):
+        h = self.hop
+        mv, boost, jump = h.step(me.t, me.pos[0], me.pos[1], me.pos[2], me.grounded, me.energy)
+        if h.done:
+            if self.hop_fol is not None:
+                self.hop_fol.passed_hop(h.info.idx)
+            self.hop = None
+            self.hop_fol = None
+            self.stuck.reset()
+            self.stuck.grace(me.t + 1.2)
+            return None
+        if h.failed:
+            fol = self.hop_fol
+            if fol is not None:
+                a = self.w.nearest_free(fol.pts[h.info.idx][0], fol.pts[h.info.idx][1], 2)
+                b = self.w.nearest_free(fol.pts[h.info.idx + 1][0], fol.pts[h.info.idx + 1][1], 2)
+                if a is not None and b is not None:
+                    self.w.ban_hop(a, b)
+                    self.hops_banned += 1
+            self.zf_key = None
+            self.hop = None
+            self.hop_fol = None
+            self.route = None
+            self.fol = None
+            self.goal = None
+            self.replans += 1
+            return None
+        self.note = "hop"
+        return [mv[0], mv[1]], boost, jump
 
     def _blocked_ahead(self, x, y, d):
         return not self.w.walkable(x, y, x + d[0] * 4.0, y + d[1] * 4.0, need=2.4, skip_start=1.0)
@@ -327,29 +423,24 @@ class Mover:
         self.escape = (best[1], best[2], 1)
         return self.escape
 
-    def _jink(self, me, move, threat_yaw):
-        t = me.t
-        if t >= self.jink_until:
-            self.jink_sign = -self.jink_sign if self.rng.random() < 0.8 else self.jink_sign
-            self.jink_until = t + self.rng.uniform(0.3, 0.55)
-        if threat_yaw is not None:
-            px, py = -math.sin(threat_yaw), math.cos(threat_yaw)     # across the line of fire
-        elif math.hypot(*move) > 0.1:
-            px, py = -move[1], move[0]
-        else:
-            px, py = -math.sin(me.yaw), math.cos(me.yaw)
-        s = self.jink_sign
-        mx = move[0] * 0.6 + px * s * 0.8
-        my = move[1] * 0.6 + py * s * 0.8
-        u = unit(mx, my)
+    def _jink(self, me, move, threat_yaw, base_w=None):
+        """Long-leg jink (main, mech/dodge.py: legs 0.6-1.4 s, chosen from 5,193 real bullets).
+        With no threat bearing and no heading, jink across our own facing (line B)."""
+        ty = threat_yaw
+        if ty is None and math.hypot(*move) <= 0.1:
+            ty = me.yaw
+        u = self.jinker.direction(me.t, move, ty, base_w)
+        if u is None:
+            return move
+        self.jink_sign = self.jinker.sign
         x, y = me.pos[0], me.pos[1]
         if not self.w.walkable(x, y, x + u[0] * 5.0, y + u[1] * 5.0, need=2.7, skip_start=1.0):
-            self.jink_sign = -s
-            mx = move[0] * 0.6 - px * s * 0.8
-            my = move[1] * 0.6 - py * s * 0.8
-            u = unit(mx, my)
-            if not self.w.walkable(x, y, x + u[0] * 5.0, y + u[1] * 5.0, need=2.7, skip_start=1.0):
+            self.jinker.flip()
+            self.jink_sign = self.jinker.sign
+            u2 = self.jinker.direction(me.t, move, ty, base_w)
+            if u2 is None or not self.w.walkable(x, y, x + u2[0] * 5.0, y + u2[1] * 5.0, need=2.7, skip_start=1.0):
                 return move
+            return u2
         return u
 
     def _dodge_bullets(self, me, shells, cur_move, forward_weight=0.45):

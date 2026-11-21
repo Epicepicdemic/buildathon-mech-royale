@@ -8,14 +8,15 @@ lookup tables that `mech/world.py` loads with the standard library:
   sight   int16 dm   top of whatever blocks sight and shots (terrain or prism top)
   clear   uint8 dm   horizontal distance from a mech centre to the nearest thing it
                      would collide with at this floor (prism, map edge, cliff), cap 25.5 m
+  canopy  int16 x 2  bottom / top of the tree crown over the vertex (dm), or 0/0 (ellipsoid crowns)
 2 m layers (navigation grid, node (u, v) is vertex (2u, 2v)):
   edges   uint8      bit k set = move to neighbour k is walkable (see DIRS)
   expo    uint8      share of the surrounding 200 m from which we are seen (x255)
   fan     uint8 x 32 distance (m, cap 255) to the first mech-hiding wall per direction
-  canopy  int16 x 2  lowest crown base / highest crown top over the cell (dm), or 0/0
   roof    int16 dm   roof height if a mech can stand here on a roof, else -32768
   arc     uint8      share of directions with a hiding wall within 12 m (x255)
   main    uint8      1 = node in the main walkable area
+  hops    records    directed jump-and-jet edges (src node, dst node, cost dm, energy, top dm)
 A JSON block carries the roof patches and the parameters used. No ranked list of positions is
 shipped: the bot scores cells against the live threats each time.
 
@@ -42,6 +43,11 @@ HIDE_H = 9.0              # a wall this tall above our floor hides a mech
 # neighbour k: (du, dv). Bit k of `edges` is the move to that neighbour.
 DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 NFAN = 32
+HOP_MAX_RISE = 12.0       # highest climb a hop edge may need (about 20 energy)
+HOP_MAX_DROP = 34.0       # deepest drop (recorded falls of 32 m did no damage)
+HOP_RISE_COST = 3.0       # walking metres charged per metre climbed
+HOP_FIXED_COST = 25.0     # walking metres charged per hop (the jump, the landing, being seen in the air)
+CROWN_ERODE = 0.15        # metres taken off each crown's semi-axes (see the canopy section)
 
 
 def log(*a):
@@ -129,6 +135,14 @@ def build(arena, out):
                 d = np.where(m & hm, hd, np.where(m, np.minimum(d, hd), d))  # inside a hole: distance to hole edge
                 m &= ~hm
         d = np.where(m, 0.0, d)
+        # thin prisms (slivers under 1.5 m across: 16 on this map, up to 21 m tall) can miss every
+        # 1 m vertex; count any vertex within 0.75 m of one as inside, or sight, shots and hop
+        # tops would not see a wall that the server collides with
+        ring_pts = list(zip(p["ring"][0::2], p["ring"][1::2]))
+        area = abs(sum(x1 * y2 - x2 * y1 for (x1, y1), (x2, y2) in zip(ring_pts, ring_pts[1:] + ring_pts[:1]))) / 2
+        per = sum(math.dist(a, b) for a, b in zip(ring_pts, ring_pts[1:] + ring_pts[:1]))
+        if per > 0 and 2 * area / per < 1.5:
+            m = m | (d <= 0.75)
         boxes.append((j0, j1, i0, i1, m, d))
     log(f"prism masks {time.time() - t0:.1f}s")
 
@@ -258,35 +272,144 @@ def build(arena, out):
     MAIN = (comp == main_id).astype(np.uint8).reshape(NV, NU)
     log(f"components {len(sizes)} main={sizes[main_id]} {time.time() - t0:.1f}s")
 
-    # ---- canopy (2 m cells): crown z-range
+    # ---- hop edges: jump and jet over what blocks a straight walk (version 3)
+    # From a free node to one 4-14 m away when walking straight there is blocked by something we can
+    # clear: a low wall, the edge of a low roof (up onto it), or a drop off one (falls do no damage:
+    # recorded falls of 15.3 and 32 m cost nothing). The climb (top of the obstacle or the landing
+    # floor, above our floor) is at most HOP_MAX_RISE; nothing may overhang the flight (no bridge
+    # or eave above); the landing node is a normal free node. Directed: a climb one way is a drop
+    # the other. Each node keeps its cheapest edge per 45 degree sector, and the cost (in metres of
+    # walking) charges for the climb, so the planner walks round anything cheaper to walk round.
+    hop_src, hop_dst, hop_cost, hop_energy, hop_top = [], [], [], [], []
+    near_wall = node_ok & (cl2 < 9.0)
+    offsets = []
+    for dv in range(-7, 8):
+        for du in range(-7, 8):
+            L = 2.0 * math.hypot(du, dv)
+            if 3.9 <= L <= 14.2:
+                offsets.append((du, dv, L, math.atan2(dv, du)))
+    best = {}          # (src node, sector) -> (cost, dst, energy, top)
+    vv0, uu0 = np.nonzero(near_wall)
+    src_flat = vv0 * NU + uu0
+    f_src = fl2[vv0, uu0]
+    for du, dv, L, ang in offsets:
+        vt, ut = vv0 + dv, uu0 + du
+        inb = (vt >= 0) & (vt < NV) & (ut >= 0) & (ut < NU)
+        vtc, utc = np.clip(vt, 0, NV - 1), np.clip(ut, 0, NU - 1)
+        ok = inb & node_ok[vtc, utc]
+        if not ok.any():
+            continue
+        f_dst = fl2[vtc, utc]
+        ns = max(2, int(L / 0.5))
+        top = np.full(len(vv0), -1e9)
+        walk_blocked = np.zeros(len(vv0), bool)
+        overhang = np.zeros(len(vv0), bool)
+        # the body is 5 m wide: the top is the highest thing within its radius of the line
+        px_, py_ = -math.sin(ang), math.cos(ang)
+        for k in range(1, ns):
+            fr = k / ns
+            jc = 2 * vv0 + 2 * dv * fr
+            ic = 2 * uu0 + 2 * du * fr
+            jj = np.clip(np.rint(jc).astype(int), 0, ny - 1)
+            ii = np.clip(np.rint(ic).astype(int), 0, nx - 1)
+            walk_blocked |= (clear[jj, ii] < EDGE_CLEAR) | steep[jj, ii]
+            for off in (-2.5, -1.25, 0.0, 1.25, 2.5):
+                jo = np.clip(np.rint(jc + py_ * off).astype(int), 0, ny - 1)
+                io = np.clip(np.rint(ic + px_ * off).astype(int), 0, nx - 1)
+                np.maximum(top, sight[jo, io], out=top)
+                overhang |= walk_under[jo, io]
+        hi = np.maximum(top, f_dst)
+        rise = hi - f_src
+        obstacle = (top - f_src > STEP_UP) | (np.abs(f_dst - f_src) > STEP_UP)
+        # a climb onto a higher floor lands well inside it (4 m clear), away from edges and taller parts
+        land_clear = cl2[vtc, utc]
+        up = f_dst > f_src + STEP_UP
+        good = ok & walk_blocked & obstacle & ~overhang & (rise <= HOP_MAX_RISE) & (f_src - f_dst <= HOP_MAX_DROP) \
+            & (~up | (land_clear >= 4.0))
+        if not good.any():
+            continue
+        climb = np.maximum(rise, 0.0)
+        cost = L + HOP_RISE_COST * climb + HOP_FIXED_COST
+        energy = np.where(climb > 2.4, (climb - 2.4) / 8.9 * 15.0 + 6.0, 2.0)
+        sector = int(round(ang / (math.pi / 4))) % 8
+        for idx in np.nonzero(good)[0]:
+            key = (int(src_flat[idx]), sector)
+            c = float(cost[idx])
+            cur = best.get(key)
+            if cur is None or c < cur[0]:
+                best[key] = (c, int(vtc[idx] * NU + utc[idx]), float(energy[idx]), float(hi[idx]))
+    for (src, _sec), (c, dst, en, hi_) in best.items():
+        hop_src.append(src)
+        hop_dst.append(dst)
+        hop_cost.append(c)
+        hop_energy.append(en)
+        hop_top.append(hi_)
+    HOPS = np.zeros(len(hop_src), dtype=[("src", "<i4"), ("dst", "<i4"), ("cost", "<u2"), ("energy", "u1"), ("top", "<i2")])
+    HOPS["src"] = hop_src
+    HOPS["dst"] = hop_dst
+    HOPS["cost"] = np.clip(np.round(np.array(hop_cost) * 10), 0, 65535)
+    HOPS["energy"] = np.clip(np.round(hop_energy), 0, 255)
+    HOPS["top"] = np.clip(np.round(np.array(hop_top) * 10), -32767, 32767)
+    log(f"hop edges {len(HOPS)} {time.time() - t0:.1f}s")
+
+    # ---- canopy (1 m vertices): the vertical chord of each tree crown over the vertex.
+    # A crown is an ellipsoid centred halfway between crownBase and height, horizontal radius crownR,
+    # vertical semi-axis (height - crownBase) / 2 (at least 0.5 m): the shape the organisers' viewer
+    # builds from these fields and the sandbox uses. Version 2 used upright cylinders, which put
+    # crown where there is none and made the bot think it was hidden when it was seen.
+    # Where two crowns cover a vertex at different heights, their chords are merged when they touch
+    # (gap <= 1 m); otherwise the longer one is kept (dropping crown can only make us think we are
+    # seen, never hidden). Trunks are left out on purpose: a raster this coarse would also block
+    # lines that pass beside a trunk, which is the dangerous direction for hiding.
     tf = w["trees"]["fields"]
     td = np.asarray(w["trees"]["data"], float).reshape(-1, len(tf))
     col = {k: tf.index(k) for k in tf}
-    can_lo = np.full((NV, NU), 1e9)
-    can_hi = np.full((NV, NU), -1e9)
-    gx2 = x0 + np.arange(NU) * 2.0
-    gy2 = y0 + np.arange(NV) * 2.0
+    can_lo = np.full((ny, nx), 1e9)
+    can_hi = np.full((ny, nx), -1e9)
     for row in td:
         cx = row[col["crownX"]] if "crownX" in col else row[col["x"]]
         cy = row[col["crownY"]] if "crownY" in col else row[col["y"]]
         r = row[col["crownR"]]
         z = row[col["z"]]
-        lo = z + row[col["crownBase"]]
-        hi = z + row[col["height"]]
-        u0 = max(0, int((cx - r - x0) / 2) - 1)
-        u1 = min(NU, int((cx + r - x0) / 2) + 2)
-        v0 = max(0, int((cy - r - y0) / 2) - 1)
-        v1 = min(NV, int((cy + r - y0) / 2) + 2)
-        if u0 >= u1 or v0 >= v1:
+        base = z + row[col["crownBase"]]
+        top = z + row[col["height"]]
+        rz = max((top - base) / 2.0, 0.5)
+        cz = (base + top) / 2.0
+        # erode by CROWN_ERODE: sampling at the nearest vertex blurs edges by up to 0.7 m,
+        # and an error at the edge should make us think we are seen, not hidden
+        re = r - CROWN_ERODE
+        if re <= 0.3:
             continue
-        GX, GY = np.meshgrid(gx2[u0:u1], gy2[v0:v1])
-        m = (GX - cx) ** 2 + (GY - cy) ** 2 <= r * r
-        a = can_lo[v0:v1, u0:u1]
-        np.minimum(a, np.where(m, lo, 1e9), out=a)
-        b = can_hi[v0:v1, u0:u1]
-        np.maximum(b, np.where(m, hi, -1e9), out=b)
-    has_can = can_hi > -1e8
-    log(f"canopy {time.time() - t0:.1f}s cells={has_can.mean():.3f}")
+        rz = max(rz - CROWN_ERODE, 0.3)
+        i0 = max(0, int(math.floor(cx - r - x0)) - 1)
+        i1 = min(nx, int(math.ceil(cx + r - x0)) + 2)
+        j0 = max(0, int(math.floor(cy - r - y0)) - 1)
+        j1 = min(ny, int(math.ceil(cy + r - y0)) + 2)
+        if i0 >= i1 or j0 >= j1:
+            continue
+        GX, GY = np.meshgrid(xs1[i0:i1], ys1[j0:j1])
+        q = 1.0 - ((GX - cx) ** 2 + (GY - cy) ** 2) / (re * re)
+        m = q > 0
+        if not m.any():
+            continue
+        half = rz * np.sqrt(np.where(m, q, 0.0))
+        lo = cz - half
+        hi = cz + half
+        a = can_lo[j0:j1, i0:i1]
+        b = can_hi[j0:j1, i0:i1]
+        empty = b < -1e8
+        touch = (lo <= b + 1.0) & (hi >= a - 1.0)
+        longer = (hi - lo) > (b - a)
+        take_new = m & (empty | (~touch & longer))
+        merge = m & ~empty & touch
+        a[:] = np.where(take_new, lo, np.where(merge, np.minimum(a, lo), a))
+        b[:] = np.where(take_new, hi, np.where(merge, np.maximum(b, hi), b))
+    has_can1 = can_hi > -1e8
+    log(f"canopy {time.time() - t0:.1f}s vertices={has_can1.mean():.3f}")
+    # the 2 m viewshed below samples the 1 m chords at node vertices
+    has_can = has_can1[0::2, 0::2]
+    can_lo2 = can_lo[0::2, 0::2]
+    can_hi2 = can_hi[0::2, 0::2]
 
     # ---- viewshed: exposure and hiding-wall fans on the 2 m grid
     sight2 = sight[0::2, 0::2]
@@ -302,7 +425,7 @@ def build(arena, out):
     fan = np.full((len(px), NDIR), 255, np.uint8)
     seen_w = np.zeros(len(px))
     tot_w = np.zeros(len(px))
-    can_dense = has_can & (can_lo < can_hi)
+    can_dense = has_can & (can_lo2 < can_hi2)
     for a in range(NDIR):
         th = 2 * math.pi * a / NDIR
         cx_, sy_ = math.cos(th), math.sin(th)
@@ -338,7 +461,7 @@ def build(arena, out):
             seen_w[vis] += d
             tot_w[tgt] += d
             np.maximum(maxang, np.where(alive, (sh - oz) / d, -1e9), out=maxang)
-            canopy_run += alive & can_dense[vc, uc] & (can_lo[vc, uc] < pf + HEIGHT) & (can_hi[vc, uc] > pf + 4.5)
+            canopy_run += alive & can_dense[vc, uc] & (can_lo2[vc, uc] < pf + HEIGHT) & (can_hi2[vc, uc] > pf + 4.5)
     expo = np.where(tot_w > 0, seen_w / np.maximum(tot_w, 1e-9), 0)
     EXPO = np.zeros((NV, NU), np.uint8)
     EXPO[vv, uu] = np.round(expo * 255).astype(np.uint8)
@@ -400,12 +523,13 @@ def build(arena, out):
         "edges": edges.astype(np.uint8),
         "expo": EXPO,
         "fan": FAN.reshape(NV, NU * NDIR),
-        "can_lo": np.where(has_can, np.round(can_lo * 10), 0).astype("<i2"),
-        "can_hi": np.where(has_can, np.round(can_hi * 10), 0).astype("<i2"),
+        "can_lo": np.where(has_can1, np.round(can_lo * 10), 0).astype("<i2"),
+        "can_hi": np.where(has_can1, np.round(can_hi * 10), 0).astype("<i2"),
         "roof": ROOF.astype("<i2"),
         "roof_id": np.where(lab >= 0, lab, 65535).astype("<u2"),
         "main": MAIN,
         "arc": ARC,
+        "hops": HOPS,
     }
     meta = {
         "nx": nx, "ny": ny, "x0": x0, "y0": y0, "step": T["step"],

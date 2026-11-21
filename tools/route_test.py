@@ -63,7 +63,9 @@ def validate_nodes(w, nodes, radius=2.5):
         bx, by = w.node_xy(b)
         L = math.hypot(bx - ax, by - ay)
         if L > 3.0:
-            bad.append((a, b, "jump"))
+            why = validate_hop(w, a, b)
+            if why:
+                bad.append((a, b, why))
             continue
         n = max(1, int(L / 0.25))
         prev = None
@@ -82,6 +84,31 @@ def validate_nodes(w, nodes, radius=2.5):
                     break
             prev = (x, y, f)
     return bad
+
+
+def validate_hop(w, a, b, max_rise=12.5, max_drop=34.5):
+    """Independent check of a jump-and-jet step: it must be a hop edge in the tables; the top it
+    jets to must clear everything on the segment (sampled every 0.25 m on the 1 m sight raster);
+    the climb and drop must be within limits; the landing must be clear ground. '' if fine."""
+    h = w.hop(a, b)
+    if h is None:
+        return "jump without a hop edge"
+    _, _, top = h
+    ax, ay = w.node_xy(a)
+    bx, by = w.node_xy(b)
+    L = math.hypot(bx - ax, by - ay)
+    n = max(2, int(L / 0.25))
+    real_top = max(w.sight(ax + (bx - ax) * k / n, ay + (by - ay) * k / n) for k in range(1, n))
+    fa, fb = w.floor(ax, ay), w.floor(bx, by)
+    if top < max(real_top, fb) - 0.15:
+        return "hop top below the obstacle"
+    if max(real_top, fb) - fa > max_rise:
+        return "hop climb too high"
+    if fa - fb > max_drop:
+        return "hop drop too deep"
+    if w.clearance(bx, by) < 2.8:
+        return "hop landing not clear"
+    return ""
 
 
 def pick_goal(w, field, start_xy, ph, rng):
@@ -105,7 +132,7 @@ def run(n_cases=500, seed=7828, sim=True, verbose=False):
     mains = [n for n in range(w.nu * w.nv) if w.main[n]]
     stats = dict(cases=0, invalid_paths=0, infeasible=0, feasible=0, met=0, missed=0, unreached=0,
                  cover_routes=0, boost_routes=0, stuck_events=0, outside_s=0.0, plan_ms_max=0.0,
-                 plan_ms_total=0.0, max_decision_ms=0.0)
+                 plan_ms_total=0.0, max_decision_ms=0.0, routes_with_hops=0, hops_flown=0)
     failures = []
     t_start = time.time()
     fields = {}
@@ -159,6 +186,9 @@ def run(n_cases=500, seed=7828, sim=True, verbose=False):
             stats["boost_routes"] += 1
         if route.kind == "zone":
             stats["zone_routes"] = stats.get("zone_routes", 0) + 1
+        if route.hops:
+            stats["routes_with_hops"] += 1
+            stats["hops_flown"] += len(route.hops)
         bad = validate_nodes(w, route.nodes)
         if bad:
             stats["invalid_paths"] += 1
@@ -210,17 +240,51 @@ def simulate(w, route, mob, now, deadline, safe, ph, energy=100.0, always_boost=
     x, y = route.pts[0]
     m = KMech(w, x, y)
     m.energy = energy
-    fol = routing.Follower(w, route.pts, route.cum)
+    fol = routing.Follower(w, route.pts, route.cum, hops=route.hops)
     stuck = routing.StuckMonitor()
     booster = routing.Booster()
     t = now
     outside = 0.0
     worst = 0.0
     limit = deadline + 60.0
+    hop = None
     while t < limit:
         if math.hypot(m.x - cx, m.y - cy) <= rs:
             return t, outside, stuck.events, worst
         t0 = time.perf_counter()
+        # jump-and-jet steps are flown with the bot's own routing.Hop
+        wait = False
+        if hop is None:
+            k = fol.hop_due(m.x, m.y)
+            if k is not None and k in route.hops:
+                info = route.hops[k]
+                if info.top <= m.z + 0.6 or m.energy >= info.energy:
+                    hop = routing.Hop(t, fol.pts[k], fol.pts[k + 1], info, w)
+                else:
+                    wait = True         # as the bot's mover does: stand at the launch until the energy is there
+        if wait:
+            m.decide((0.0, 0.0), False, False)
+            t += 0.1
+            stuck.update(t, m.x, m.y, False)
+            continue
+        if hop is not None:
+            mv, boost, jump = hop.step(t, m.x, m.y, m.z, m.grounded, m.energy)
+            if hop.done or hop.failed:
+                if hop.done:
+                    fol.passed_hop(hop.info.idx)
+                hop = None
+                stuck.reset()
+                stuck.grace(t + 1.2)
+            else:
+                m.decide(mv, boost, jump)
+                t += 0.1
+                u = 0.0 if t <= ph["shrink_start"] else min(1.0, (t - ph["shrink_start"]) / (ph["shrink_end"] - ph["shrink_start"]))
+                zcx = ph["center"][0] + (ph["next_center"][0] - ph["center"][0]) * u
+                zcy = ph["center"][1] + (ph["next_center"][1] - ph["center"][1]) * u
+                zr = ph["radius"] + (ph["next_radius"] - ph["radius"]) * u
+                if math.hypot(m.x - zcx, m.y - zcy) > zr:
+                    outside += 0.1
+                continue
         tx, ty, rem, off = fol.target(m.x, m.y)
         # remaining distance until inside the safe circle
         rem_enter = max(0.0, route.enter_len - (route.length - rem))

@@ -19,10 +19,12 @@ INF = float("inf")
 class ZoneField:
     """Walking distance (metres) from every node to the nearest node inside a circle."""
 
-    def __init__(self, world, cx, cy, r, stay=None, outside_mult=5.0):
+    def __init__(self, world, cx, cy, r, stay=None, outside_mult=5.0, use_hops=True):
         """`stay` = (cx, cy, r): the current zone. Walking outside it costs `outside_mult` times
-        more, so paths go around buildings on the inside of the circle when they can."""
+        more, so paths go around buildings on the inside of the circle when they can. With
+        `use_hops`, paths may jump and jet over low walls and roofs (world.hop_out)."""
         self.w = world
+        self.use_hops = use_hops
         self.cx, self.cy, self.r = cx, cy, r
         nu, nv = world.nu, world.nv
         self.dist = [INF] * (nu * nv)
@@ -89,6 +91,7 @@ class ZoneField:
         count = 0
         ins = self.inside
         om = self.om
+        hops_in = self.w.hop_in if self.use_hops else {}
         while heap:
             d, n = pop(heap)
             if d > dist[n]:
@@ -104,6 +107,14 @@ class ZoneField:
                 for o, c in table[edges[n]]:
                     m = n + o
                     nd = d + (c if ins[m] else c * om)
+                    if nd < dist[m]:
+                        dist[m] = nd
+                        push(heap, (nd, m))
+            hin = hops_in.get(n)
+            if hin is not None:
+                # reverse search: m can hop to n
+                for m, c in hin:
+                    nd = d + (c if ins is None or ins[m] else c * om)
                     if nd < dist[m]:
                         dist[m] = nd
                         push(heap, (nd, m))
@@ -136,6 +147,13 @@ class ZoneField:
                 v = dm + (c if ins is None or ins[n] else c * self.om)
                 if v < best:
                     best, bn = v, m
+        if self.use_hops:
+            for m, c, _e, _top in self.w.hop_out.get(n, ()):
+                dm = dist[m]
+                if dm < d0:
+                    v = dm + (c if ins is None or ins[n] else c * self.om)
+                    if v < best:
+                        best, bn = v, m
         return bn
 
     def path(self, n, max_nodes=2000):
@@ -152,10 +170,12 @@ class AStar:
     """Resumable A* from start to goal over walkable nodes. `mult[n]` (optional) scales the cost
     of entering n; it must be >= 1 so the straight-line heuristic stays admissible."""
 
-    def __init__(self, world, start, goal, mult=None, max_pops=200000, stay=None, outside_mult=5.0):
+    def __init__(self, world, start, goal, mult=None, max_pops=200000, stay=None, outside_mult=5.0, use_hops=True):
         """`stay` = (cx, cy, r): entering a node outside this circle (the current zone) costs
-        `outside_mult` times more, so routes go round buildings on the inside of the circle."""
+        `outside_mult` times more, so routes go round buildings on the inside of the circle.
+        `use_hops`: the route may jump and jet over low walls and roofs (world.hop_out)."""
         self.w = world
+        self.use_hops = use_hops
         self.start, self.goal = start, goal
         self.mult = mult
         self.stay = stay
@@ -191,6 +211,7 @@ class AStar:
         pop, push = heapq.heappop, heapq.heappush
         clock = time.perf_counter
         count = 0
+        hops = self.w.hop_out if self.use_hops else {}
         stay = self.stay
         if stay is not None:
             # in grid units relative to the grid origin
@@ -211,7 +232,11 @@ class AStar:
                 self.result = path
                 self.pops += count
                 return True
-            for o, c in table[edges[n]]:
+            nb = table[edges[n]]
+            ho = hops.get(n)
+            if ho is not None:
+                nb = nb + tuple((m - n, c) for m, c, _e, _top in ho)
+            for o, c in nb:
                 m = n + o
                 nd = d + (c * mult[m] if mult is not None else c)
                 if stay is not None:

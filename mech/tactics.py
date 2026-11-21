@@ -13,11 +13,14 @@ import random
 from . import air as A
 from . import doctrine as D
 from . import positions as P
+from .cover import IsolateSearch
 from .geom import angdiff, bearing, unit, wrap
 from .gunner import Target
 from .loot import LootMemory
 
-WANTED_WEAPONS = ("laser", "lightning")     # laser first (kills happen at range), lightning second, never mortar
+WANTED_WEAPONS = ("laser", "lightning")     # held together; never a mortar (main, Sat 07:20)
+COMMIT_FIGHT_S = 3.0    # a fight is held this long unless something real changes (main, 80ae09e)
+COMMIT_BREAK_S = 1.5    # a break is held this long before turning back to fight
 
 
 def upgrade_score(me, uid):
@@ -90,6 +93,13 @@ class Tactics:
         self.expose_hp = None
         self.last_play = None
         self.play_since = 0.0
+        self.play_hp0 = 1400.0
+        self.play_others = 0
+        self.play_target = None
+        self.iso = None              # (node, path) hidden from all attackers but one (main)
+        self.iso_search = None
+        self.iso_key = None
+        self.iso_t = -1e9
         self.healing = False
         self.look_phase = 0.0
         self.rear_flip = 1
@@ -138,6 +148,165 @@ class Tactics:
 
     def _me_weapons(self, me):
         return {w.kind: w.stats for w in me.weapons}
+
+    # ------------------------------------------------------------------ ported from main (candidate 1)
+    def _swap_slot(self, me, kind):
+        """For a wanted pickup of `kind` (laser or lightning): None to take it into a free slot, a
+        slot number to drop for it, or False to leave it. Laser and lightning are held together and
+        never dropped for each other; with both slots full a mortar goes first, else the gun (the
+        only way the two rules-limited slots can hold the pair)."""
+        if kind not in WANTED_WEAPONS or kind in (w.kind for w in me.weapons):
+            return False
+        if me.slots_free:
+            return None
+        mort = me.by_kind.get("mortar")
+        if mort is not None:
+            return mort.slot
+        other = "lightning" if kind == "laser" else "laser"
+        gun = me.by_kind.get("gun")
+        if gun is not None and other in me.by_kind:
+            return gun.slot
+        return False
+
+    def shooters(self, me):
+        """Mechs with a line of fire on us that know where we are: in the observation, nothing
+        solid between us, and either it hit us in the last 2.5 s or it can see us."""
+        t = me.t
+        return [e for e in self.th.active_mechs(t, 3.0)
+                if e.shootable() and (t - e.t_hit_us <= 2.5 or e.sees_us)]
+
+    def _commit(self, me, play, target, calc, others, sit):
+        """Hold a fight once it starts; leave early only for heavy damage since it began, low HP, a
+        new attacker or an unseen shooter. Hold a break long enough to get somewhere unless the
+        target can be finished (main 80ae09e: version 2 flipped plays every few tenths of a second)."""
+        t = me.t
+        prev = self.last_play
+        dwell = t - self.play_since
+        same = target is not None and target.id == self.play_target
+        if prev in (D.ASSAULT, D.CORNER) and play == D.BREAK and same and dwell < COMMIT_FIGHT_S:
+            lost = (self.play_hp0 - me.hp) / me.max_hp
+            newcomer = len(others) > self.play_others
+            if lost < 0.22 and me.hp_frac > 0.35 and not newcomer and not sit.unseen_hit and \
+                    calc is not None and calc.ratio >= 0.45:
+                return prev
+        if prev == D.BREAK and play in (D.ASSAULT, D.CORNER) and dwell < COMMIT_BREAK_S and same and \
+                not (calc is not None and calc.finishable):
+            return D.BREAK
+        return play
+
+    def _isolate(self, me, dec, enemies):
+        """Two or more mechs with a line of fire on us from bearings more than 60 degrees apart:
+        walk to the nearest spot (within 30 m) hidden from all of them but one, and fight that one."""
+        t = me.t
+        sh = self.shooters(me)
+        if len(sh) < 2:
+            self.iso = None
+            self.iso_search = None
+            return False
+        bs = [bearing(me.pos, e.est_pos(t)) for e in sh]
+        if max(angdiff(a, b) for a in bs for b in bs) < 1.05:
+            return False
+        cur = dec.target.track if dec.target is not None else None
+        prim = cur if cur in sh else min(sh, key=lambda e: self._dist(me, e) + 0.05 * (e.hp or 1400.0))
+        others = [e for e in sh if e is not prim]
+        eyes = []
+        for e in others:
+            p = e.est_pos(t)
+            eyes.append((p[0], p[1], p[2] + 8.0))
+        pc = prim.est_pos(t)
+        key = (prim.id, tuple(sorted(e.id for e in others)), round(me.pos[0] / 8.0), round(me.pos[1] / 8.0))
+        if key != self.iso_key or (self.iso is None and self.iso_search is None and t - self.iso_t > 1.0):
+            start = self.w.nearest_free(me.pos[0], me.pos[1], 5)
+            if start is not None:
+                self.iso_search = IsolateSearch(self.w, start, (pc[0], pc[1], pc[2] + 4.5), eyes, max_cost=30.0,
+                                                height=me.height)
+                self.iso_key = key
+                self.iso_t = t
+                self.iso = None
+        if self.iso_search is not None and self.iso_search.done:
+            self.iso = self.iso_search.result
+            self.iso_search = None
+        if self.iso is None:
+            return False
+        node, path = self.iso
+        self.mv.go_path(path, "isolate")
+        dec.target = Target.from_track(prim, t, float((self.cfg.get("cubes") or {}).get("size_per_cube", 0.05)))
+        if dec.intent is not None:
+            dec.intent.fire = "long"
+            dec.intent.label = "isolate %d" % prim.id
+        dec.direct = None
+        dec.hold = False
+        return True
+
+    def _reload_cover(self, me, dec):
+        """Reloading (2.4 s without the gun) while something has a line of fire on us: step behind
+        the nearest cover if it is a few strides away (main 8ae4ed4, squad seed 4)."""
+        gun = me.by_kind.get("gun")
+        if gun is None or not (gun.reload > 0 or gun.ammo == 0) or len(me.weapons) > 1:
+            return
+        if not self.shooters(me):
+            return
+        hide = self.cov.hide_xy()
+        if hide is None or math.hypot(hide[0] - me.pos[0], hide[1] - me.pos[1]) > 18.0:
+            return
+        self.mv.go(hide, me, self.zone, prefer_cover=False, tag="reload-cover", replan_dist=3.0)
+        dec.direct = None
+        dec.hold = False
+        dec.speed = "boost" if me.energy > 20 else "walk"
+        if dec.intent is not None:
+            dec.intent.label = "reload: cover"
+        dec.label = "reload: cover"
+
+    def _reload_discipline(self, me, dec):
+        """Start an early reload only when nothing could make us pay for it: no mech we could
+        shoot within 150 m and nothing has hit us in 3 s (main, squad seed 8). Empty still reloads."""
+        intent = dec.intent
+        if intent is None or not intent.reload_ok:
+            return
+        t = me.t
+        for e in self.th.active_mechs(t, 3.0):
+            if t - e.t_hit_us <= 3.0 or (e.shootable() and self._dist(me, e) <= 150.0):
+                intent.reload_ok = False
+                return
+
+    def _return_fire(self, me, dec):
+        """Whatever the play (loot, healing, a break, the air): while a mech has a line of fire on
+        us, keep the torso on it, shoot back, and dodge with long jink legs, boosting beyond 45 m
+        (main mech/dodge.py: real bullets hit 65/26/10% at 45-78/78-150/150+ m against that,
+        76/48/32% against version 2's short walking jink)."""
+        sh = self.shooters(me)
+        if not sh:
+            return
+        t = me.t
+        intent = dec.intent
+        cur = dec.target
+        pick = min(sh, key=lambda e: self._dist(me, e) - (150.0 if t - e.t_hit_us <= 1.5 else 0.0))
+        keep = cur is not None and cur.kind == "mech" and cur.track is not None and cur.track in sh and \
+            intent is not None and intent.fire not in ("none", "single")
+        if keep and cur.track is not pick and t - cur.track.t_hit_us > 1.5 and t - pick.t_hit_us <= 1.5 \
+                and self._dist(me, pick) < self._dist(me, cur.track):
+            keep = False
+        if keep:
+            best = cur.track
+        else:
+            best = pick
+            dec.target = Target.from_track(best, t, float((self.cfg.get("cubes") or {}).get("size_per_cube", 0.05)))
+        if intent is not None:
+            if intent.fire in ("none", "single"):
+                intent.fire = "long"
+            intent.under_fire = True
+            if not (intent.label or "").endswith("+fire"):
+                intent.label = (intent.label or "") + " +fire"
+        p = best.est_pos(t)
+        dec.face = bearing(me.pos, p)
+        dec.threat_yaw = dec.face
+        isolating = intent is not None and (intent.label or "").startswith("isolate")
+        if (not dec.hold or intent is None or intent.spot != "peek") and not isolating:
+            dec.evasive = True
+        if self._dist(me, best) >= 45.0 and me.energy > 35.0 and me.grounded and dec.speed != "silent":
+            dec.speed = "boost"
+        if intent is not None:
+            dec.label = intent.label
 
     def situation(self, me, enemy, others, corner):
         unseen = self.th.unseen_attacker(me.t, 2.0)
@@ -283,18 +452,9 @@ class Tactics:
         for pid, (k, pp, _) in self.loot.pickups.items():
             if k not in WANTED_WEAPONS or k in kinds:
                 continue
-            drop = None
-            if not me.slots_free:
-                mort = me.by_kind.get("mortar")
-                light = me.by_kind.get("lightning")
-                if mort is not None:
-                    drop = mort.slot
-                elif light is not None and k == "laser":
-                    if light.cooldown > 0.2:
-                        continue
-                    drop = light.slot
-                else:
-                    continue
+            drop = self._swap_slot(me, k)
+            if drop is False:
+                continue
             d = math.hypot(pp[0] - me.pos[0], pp[1] - me.pos[1])
             max_d = 145.0 if k == "laser" else 95.0
             if d > max_d or abs(pp[2] - me.pos[2]) > 6.5 or not zone_ok(pp[0], pp[1]):
@@ -357,7 +517,7 @@ class Tactics:
             score = d * (0.65 + 0.35 * hp_factor)
             if best is None or score < best[0]:
                 best = (score, tg)
-        if best is None and allow_npc and gun is not None:
+        if best is None and allow_npc and (gun is not None or me.by_kind.get("laser") is not None):
             for tr in self.th.npcs():
                 if not tr.in_obs or not tr.los:
                     continue
@@ -378,6 +538,15 @@ class Tactics:
 
     # ------------------------------------------------------------------ main
     def decide(self, me, obs):
+        dec = self._decide(me, obs)
+        self._return_fire(me, dec)
+        self._reload_discipline(me, dec)
+        self._reload_cover(me, dec)
+        if self.loot_note and self.last_play == D.REPOSITION and self.loot_note not in (dec.label or ""):
+            dec.label = (dec.label or "") + " " + self.loot_note
+        return dec
+
+    def _decide(self, me, obs):
         t = me.t
         dec = Decision()
         if self.spawn is None:
@@ -414,6 +583,7 @@ class Tactics:
                   (o.sees_us or t - o.t_hit_us <= 3.0 or (o.los and self._dist(me, o) <= 110.0))]
         sit = self.situation(me, target, others, corner_ready)
         play, calc = D.choose_play(sit, calc if target is not None else None, prev=self.last_play)
+        play = self._commit(me, play, target, calc, others, sit)
         slack = self.mv.slack(me, z)
         dec.threat_yaw = self.danger_yaw(me)
         lt = self.laser_threat(me)
@@ -429,6 +599,9 @@ class Tactics:
         if play != self.last_play:
             self.last_play = play
             self.play_since = t
+            self.play_hp0 = me.hp
+            self.play_others = len(others)
+        self.play_target = target.id if target is not None else None
 
         alt_shoot = self._shootable(me, enemies)
         ctx = {
@@ -570,6 +743,13 @@ class Tactics:
         else:
             self._reposition(me, obs, dec, watchers, slack)
 
+        # ---------------- several attackers from different sides: fight them one at a time (main)
+        if play in (D.ASSAULT, D.CORNER, D.BREAK):
+            self._isolate(me, dec, enemies)
+        else:
+            self.iso = None
+            self.iso_search = None
+
         # ---------------- counters to lasers & mortars
         self._counter_laser(me, dec, lt, enemies)
         self._counter_mortar(me, dec)
@@ -597,8 +777,6 @@ class Tactics:
         if dec.face is None and dec.threat_yaw is not None:
             dec.face = dec.threat_yaw
         dec.label = intent.label if intent is not None else ""
-        if self.loot_note and play == D.REPOSITION:
-            dec.label += " " + self.loot_note
         return dec
 
     @staticmethod
