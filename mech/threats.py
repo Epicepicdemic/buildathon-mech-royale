@@ -159,6 +159,7 @@ class Threats:
         self.mortar_heard = None      # (t, bearing, band) of the latest mortar launch heard
         self.prev_in_obs = set()
         self.t_fight = -1e9           # we last dealt or took weapon damage
+        self.last_kill_pos = None     # where the last mech we killed was
 
     # ------------------------------------------------------------------ helpers
     def band_dist(self, kind, band):
@@ -335,6 +336,7 @@ class Threats:
                 tr = self.tracks.get(e.get("target"))
                 if tr is not None:
                     tr.dead = True
+                    self.last_kill_pos = tuple(tr.pos)
                 self.kills += 1
                 self.last_kill_t = t
                 self.deaths.append((t, "kill"))

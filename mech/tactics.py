@@ -75,6 +75,7 @@ class Tactics:
         self.hold_dur = 20.0
         self.play_others = 0
         self.play_target = None
+        self.kill_site = None        # (x, y, z, t) where our last kill fell
         self.iso = None              # (node, path) hidden from all attackers but one
         self.iso_search = None
         self.iso_key = None
@@ -217,6 +218,75 @@ class Tactics:
         dec.hold = False
         return True
 
+    KILL_DROP_S = 25.0       # how long after a kill its drop is worth going back for
+    KILL_DROP_R = 25.0       # cubes and weapons this close to the kill site are the kill's
+
+    def _drop_covered(self, me, p):
+        """Does a mech we know of have a line of fire on the point p (a drop on the ground)?"""
+        t = me.t
+        for e in self.th.active_mechs(t, 4.0):
+            if not e.in_obs:
+                continue
+            q = e.est_pos(t)
+            if math.hypot(q[0] - p[0], q[1] - p[1]) > 230.0:
+                continue
+            if self.w.shot_clear((q[0], q[1], q[2] + 7.0), (p[0], p[1], p[2] + 4.5)):
+                return True
+        return False
+
+    def _collect_kill_drop(self, me, obs, dec, slack):
+        site = self.kill_site
+        if site is None:
+            return False
+        t = me.t
+        sx, sy, sz, tk = site
+        if t - tk > self.KILL_DROP_S or slack < 8.0 or self.shooters(me):
+            if t - tk > self.KILL_DROP_S:
+                self.kill_site = None
+            return False
+        items = []
+        kinds = [w.kind for w in me.weapons]
+        for c in obs.get("cubes") or []:
+            cp = c.get("pos")
+            if math.hypot(cp[0] - sx, cp[1] - sy) <= self.KILL_DROP_R and abs(cp[2] - me.pos[2]) <= 3.5:
+                items.append(("cube", c["id"], cp, None, False))
+        for pk in obs.get("pickups") or []:
+            pp = pk.get("pos")
+            k = pk.get("kind")
+            if math.hypot(pp[0] - sx, pp[1] - sy) > self.KILL_DROP_R or abs(pp[2] - me.pos[2]) > 4.0:
+                continue
+            if k not in WANTED_WEAPONS or k in kinds:
+                continue
+            drop = self._swap_slot(me, k)
+            if drop is False:
+                continue
+            reach = float((self.cfg.get("loot") or {}).get("pickup_radius", 4.0))
+            in_reach = math.hypot(pp[0] - me.pos[0], pp[1] - me.pos[1]) <= reach - 0.3
+            items.append(("pickup", pk["id"], pp, drop, in_reach))
+        if not items:
+            # nothing listed yet: if the site is close and fresh, step up to where we can see it
+            if t - tk < 6.0 and math.hypot(sx - me.pos[0], sy - me.pos[1]) > 6.0 and \
+                    math.hypot(sx - me.pos[0], sy - me.pos[1]) < 60.0 and not self._drop_covered(me, (sx, sy, sz)):
+                self.mv.go((sx, sy), me, self.zone, prefer_cover=False, tag="kill-site", replan_dist=3.0)
+                dec.speed = "walk"
+                dec.intent.label = "kill drop: look"
+                return True
+            if t - tk > 6.0:
+                self.kill_site = None
+            return False
+        items = [it for it in items if not self._drop_covered(me, it[2])]
+        if not items:
+            return False
+        kind, lid, pos, drop, in_reach = min(items, key=lambda it: math.hypot(it[2][0] - me.pos[0], it[2][1] - me.pos[1]))
+        if kind == "pickup" and in_reach:
+            dec.take = lid
+            dec.drop = drop
+        self.mv.go((pos[0], pos[1]), me, self.zone, prefer_cover=False, tag="drop-%s" % lid, replan_dist=1.5)
+        dec.speed = "boost" if me.energy > 40 else "walk"
+        dec.intent.label = "kill drop: " + kind
+        self.loot_note = "kill drop"
+        return True
+
     def _worth_starting(self, me, e, enemies):
         if not e.in_obs:
             return False
@@ -325,6 +395,21 @@ class Tactics:
         return wrap(base + 0.85 * math.sin(self.look_phase * 0.6))
 
     # ------------------------------------------------------------------ loot
+    def _swap_slot(self, me, kind):
+        """For a wanted pickup of `kind`: None to take it into a free slot, a slot number to drop
+        for it, or False to leave it. A mortar is always given up (cook-off)."""
+        if kind in (w.kind for w in me.weapons):
+            return False
+        if me.slots_free:
+            return None
+        mort = me.by_kind.get("mortar")
+        if mort is not None:
+            return mort.slot
+        light = me.by_kind.get("lightning")
+        if kind == "laser" and light is not None:
+            return light.slot if light.cooldown <= 0.2 else False
+        return False
+
     def loot_choice(self, me, obs):
         """(goal xy, take id, drop slot, crate/npc Target) for safe opportunities, or None."""
         t = me.t
@@ -337,19 +422,9 @@ class Tactics:
             # never a mortar: carrying one makes every laser hit us 60% harder (cook-off)
             if k not in WANTED_WEAPONS or k in kinds:
                 continue
-            drop = None
-            if not me.slots_free:
-                # swap a mortar for any wanted weapon, and lightning for a laser; never drop the gun
-                mort = me.by_kind.get("mortar")
-                light = me.by_kind.get("lightning")
-                if mort is not None and k in WANTED_WEAPONS:
-                    drop = mort.slot
-                elif light is not None and k == "laser":
-                    if light.cooldown > 0.2:
-                        continue
-                    drop = light.slot
-                else:
-                    continue
+            drop = self._swap_slot(me, k)
+            if drop is False:
+                continue
             d = math.hypot(pp[0] - me.pos[0], pp[1] - me.pos[1])
             if d > 80 or abs(pp[2] - me.pos[2]) > 6:
                 continue
@@ -523,6 +598,10 @@ class Tactics:
             self.relocate_until = t + 9.0
             self.relocate_from = (me.pos[0], me.pos[1])
             self.cov.reset()
+            # where the victim fell: its cubes (all of them, plus two) and its weapons lie there
+            site = th.last_kill_pos
+            if site is not None:
+                self.kill_site = (site[0], site[1], site[2], t)
         # enemies we know about now
         active = th.active_mechs(t, 6.0)
         enemies = [e for e in active if not e.phantom or t - e.t_hit_us <= 4.0]
@@ -766,6 +845,12 @@ class Tactics:
                     self.opening_done = True
                 intent.label = "opening: searching"
                 return
+        # 2a. what our kill dropped: collect it before anything else, unless a mech we know of has
+        #     a line of fire on it. A kill drops all the victim's cubes plus two, and cubes compound
+        #     (4% HP and damage each); version 2 walked 30 m away from them whenever anything had
+        #     been seen or heard in 10 s, which against a hunting squad was nearly always.
+        if self._collect_kill_drop(me, obs, dec, slack):
+            return
         # 2. cubes and weapons lying nearby when nobody is on us (walking does not stop healing),
         #    including the cubes a kill drops, before we move on
         # cubes are how the most consistent showdown team wins the middle of the match (13 a match,

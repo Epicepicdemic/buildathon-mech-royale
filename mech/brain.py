@@ -136,14 +136,9 @@ class Bot:
                 continue
             pp = p.get("pos")
             if math.hypot(pp[0] - me.pos[0], pp[1] - me.pos[1]) <= reach - 0.2 and abs(pp[2] - me.pos[2]) <= 3.8:
-                if me.slots_free:
-                    return p["id"], None
-                mort = me.by_kind.get("mortar")
-                if mort is not None:
-                    return p["id"], mort.slot
-                light = me.by_kind.get("lightning")
-                if k == "laser" and light is not None and light.cooldown <= 0.2:
-                    return p["id"], light.slot
+                drop = self.tactics._swap_slot(me, k)
+                if drop is not False:
+                    return p["id"], drop
         return None, None
 
 
