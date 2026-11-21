@@ -96,6 +96,55 @@ class DetectorTests(unittest.TestCase):
         self.assertFalse(bot.tactics.mode.locked)
         self.assertEqual(bot.tactics.mode.mode, "squad")
 
+    def test_our_own_hit_is_not_evidence(self):
+        """5537640 locked free-for-all in 27 of 40 squad matches on 'mech hurt by another' that was
+        our own hit: the HP drop is seen before the tick's hit event."""
+        w = world()
+
+        def mechs(k):
+            e = hunter(w, k)
+            e["hp"] = 1400 - 45 * k
+            return [e]
+
+        def extra(obs, k):
+            obs["events"] = [{"type": "hit", "target": 9, "amount": 45, "weapon": "gun"}]
+        bot, labels = drive(40, mechs, t0=18.0, extra=extra)
+        self.assertFalse(bot.tactics.mode.locked, bot.tactics.mode.why)
+        self.assertEqual(bot.tactics.mode.mode, "squad")
+
+    def test_a_mech_hurt_while_another_aims_and_fires_at_it_is_evidence(self):
+        w = world()
+        a, b = (ME[0] + 100.0, ME[1] + 30.0), (ME[0] + 100.0, ME[1] - 30.0)
+
+        def mechs(k):
+            ea = enemy(8, a[0], a[1], w, -math.pi / 2)            # torso on b
+            eb = enemy(10, b[0], b[1], w, 0.0)
+            eb["hp"] = 1400 - 40 * k
+            return [ea, eb]
+
+        def extra(obs, k):
+            obs["beams"] = [{"by": 8, "kind": "laser", "path": [[a[0], a[1], 7.0], [b[0] + 30.0, b[1] - 30.0, 4.0]]}]
+        bot, labels = drive(10, mechs, t0=10.0, extra=extra)
+        self.assertTrue(bot.tactics.mode.locked)
+
+    def test_a_death_in_a_later_phase_is_not_evidence(self):
+        """zone.shrink_start moves to each later phase; deaths then may be the zone."""
+        def extra(obs, k):
+            obs["zone"]["shrink_start"] = 60.0 if k < 5 else 200.0      # the next phase announced
+            obs["alive"] = 12 if k < 20 else 11
+        bot, labels = drive(40, lambda k: [hunter(world(), k)], t0=95.0, extra=extra)
+        self.assertFalse(bot.tactics.mode.locked, bot.tactics.mode.why)
+
+    def test_a_shot_passing_near_another_mech_is_not_evidence(self):
+        w = world()
+        a, b = (ME[0] + 100.0, ME[1] + 30.0), (ME[0] + 100.0, ME[1] - 30.0)
+
+        def extra(obs, k):
+            obs["projectiles"] = [{"id": 900 + k, "kind": "gun", "pos": [a[0], a[1] - 10.0, 8.0], "vel": [0.0, -250.0, 0.0]}]
+        mechs = lambda k: [enemy(8, a[0], a[1], w, -math.pi / 2), enemy(10, b[0], b[1], w, 0.0), hunter(w, k)]
+        bot, labels = drive(40, mechs, t0=18.0, extra=extra)
+        self.assertFalse(bot.tactics.mode.locked, bot.tactics.mode.why)
+
     def test_off_switch_means_always_ffa(self):
         with switch("mode_detector", False):
             bot, labels = drive(40, lambda k: [hunter(world(), k)], t0=18.0)

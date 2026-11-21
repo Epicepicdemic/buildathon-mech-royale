@@ -433,14 +433,6 @@ class Threats:
                 tox, toy = me.pos[0] - pos[0], me.pos[1] - pos[1]
                 if (tox * v[0] + toy * v[1]) / (sp * max(1e-6, math.hypot(tox, toy))) < 0.9:
                     tr.t_fired_other = t
-                    for o in self.tracks.values():
-                        if o is tr or o.kind != "mech" or not o.in_obs or o.dead:
-                            continue
-                        ox, oy = o.pos[0] - pos[0], o.pos[1] - pos[1]
-                        ahead = (ox * v[0] + oy * v[1]) / sp
-                        if 0.0 < ahead < 260.0 and abs(ox * v[1] - oy * v[0]) / sp < 4.0:
-                            tr.t_fired_mech = t
-                            break
 
     def _sounds(self, obs, me):
         t = me.t

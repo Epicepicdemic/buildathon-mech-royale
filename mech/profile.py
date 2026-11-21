@@ -41,10 +41,12 @@ class ModeDetector:
     """Free-for-all unless the match looks like the practice squad.
 
     Evidence of a free-for-all (any one makes it permanent):
-      - fire between two other mechs: a beam ending on one, or a shot whose path passes one
-        (Track.t_fired_mech);
-      - another mech losing HP not to us while inside the zone and with no drone within 60 m;
-      - a death we did not cause before the zone starts closing (after that it may be the zone).
+      - fire between two other mechs: a laser beam ending on one (Track.t_fired_mech; a shot whose
+        path merely passes one was dropped: squad hunters shooting drones and crates past a teammate
+        set it in 3 of 40 squad matches);
+      - another mech losing HP not to us (checked after the tick's hit events) while inside the zone,
+        with no drone within 60 m, and another mech in view with its torso on it that fired within 1 s;
+      - a death we did not cause before the first phase's shrink starts (after that it may be the zone).
     Squad: from 20 s on, no such evidence, and a hunter converging on us (it hit us, it closes on
     us faster than 2 m/s within 200 m, or its torso is on us). A quiet free-for-all opening with
     nobody coming for us therefore stays free-for-all; and any later evidence switches back for
@@ -57,6 +59,7 @@ class ModeDetector:
         self.why = None
         self.t_squad = None
         self.seen_uncredited = 0
+        self.first_shrink = None     # the first phase's shrink start: before it nobody dies to the zone
 
     def squad(self):
         return on("mode_detector") and self.mode == "squad"
@@ -77,21 +80,33 @@ class ModeDetector:
 
     def _evidence(self, me, th, zone):
         t = me.t
+        if self.first_shrink is None:
+            self.first_shrink = zone.shrink_start
         npcs = [n.pos for n in th.npcs()]
         for tr in th.mechs():
             if tr.kind != "mech":
                 continue
             if t - getattr(tr, "t_fired_mech", -1e9) <= FIRE_EVIDENCE_S:
                 return "fire between mechs (%d)" % tr.id
-            if tr.in_obs and tr.t_hp_drop_other == t:
+            if tr.in_obs and tr.t_hp_drop_other == t and t - tr.t_we_hit > 0.5:
+                # positive evidence only (the study's counter): another mech in view, torso on it, fired
+                # within 1 s. A bare HP drop was our own hit seen before its hit event (5537640: 27 of 40
+                # squad matches locked free-for-all that way), or a drone's, or the zone's
                 inside = zone.margin_at(tr.pos[0], tr.pos[1], t) >= 2.0
                 near_drone = any(math.hypot(p[0] - tr.pos[0], p[1] - tr.pos[1]) < 60.0 for p in npcs)
                 if inside and not near_drone:
-                    return "mech %d hurt by another" % tr.id
+                    for o in th.mechs():
+                        if o is tr or not o.in_obs or o.dead or t - getattr(o, "t_fired", -1e9) > 1.0:
+                            continue
+                        q = o.est_pos(t)
+                        if _angdiff(o.yaw, math.atan2(tr.pos[1] - q[1], tr.pos[0] - q[0])) < 0.3:
+                            return "mech %d hurt by mech %d" % (tr.id, o.id)
         unc = getattr(th, "uncredited", 0)
         if unc > self.seen_uncredited:
             self.seen_uncredited = unc
-            if t < zone.shrink_start:
+            if t < self.first_shrink:
+                # (zone.shrink_start moves on to each later phase: comparing with it counted zone
+                # deaths later in squad matches, 17 of 40)
                 return "a death we did not cause"
         return None
 
