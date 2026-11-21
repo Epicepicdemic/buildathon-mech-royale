@@ -16,8 +16,11 @@ from . import positions as P
 from .geom import angdiff, bearing, unit, wrap
 from .gunner import Target
 from .loot import LootMemory
+from . import profile as PF
 
 WANTED_WEAPONS = ("laser", "lightning")     # laser first (kills happen at range), lightning second, never mortar
+LOSE_S = 1.5            # squad_no_break: clearly losing this long before a break stands
+LOSE_NEAR_M = 160.0     # ... counting mechs this close
 
 
 def upgrade_score(me, uid):
@@ -89,6 +92,8 @@ class Tactics:
         self.expose_t = None
         self.expose_hp = None
         self.last_play = None
+        self.mode = PF.ModeDetector()   # squad-practice profile (mech/profile.py)
+        self.losing_since = None        # squad_no_break: when we began clearly losing
         self.play_since = 0.0
         self.healing = False
         self.look_phase = 0.0
@@ -135,6 +140,34 @@ class Tactics:
             if best is None or score < best[0]:
                 best = (score, e)
         return best[1] if best else None
+
+    def _losing(self, me, target, enemies):
+        """Clearly losing (recon/rea-mech-royale.md P1): two or more mechs within 160 m and our HP
+        under 55%, three or more and under 80%, or under 35% against a healthier target."""
+        hp = me.hp_frac
+        near = sum(1 for e in enemies if not e.dead and self._dist(me, e) <= LOSE_NEAR_M)
+        if near >= 2 and hp < 0.55:
+            return True
+        if near >= 3 and hp < 0.80:
+            return True
+        return target is not None and hp < 0.35 and target.hp_frac() > hp
+
+    def _lose_rule(self, me, play, target, calc, enemies, sit, corner_ready):
+        """Squad profile: the squad shares vision, so hiding buys nothing. A break stands only once
+        we have been clearly losing for 1.5 s, never while finishing a kill; otherwise fight from
+        the corner if one is ready, else press."""
+        t = me.t
+        if self._losing(me, target, enemies):
+            if self.losing_since is None:
+                self.losing_since = t
+        else:
+            self.losing_since = None
+        if play != D.BREAK or target is None or sit.unseen_hit or calc is None or calc.our_dps <= 1e-6:
+            return play
+        finishing = calc.finishable or target.hp_frac() <= 0.30
+        if not finishing and self.losing_since is not None and t - self.losing_since >= LOSE_S:
+            return play
+        return D.CORNER if corner_ready else D.ASSAULT
 
     def _me_weapons(self, me):
         return {w.kind: w.stats for w in me.weapons}
@@ -413,7 +446,11 @@ class Tactics:
         others = [o for o in enemies if o is not target and
                   (o.sees_us or t - o.t_hit_us <= 3.0 or (o.los and self._dist(me, o) <= 110.0))]
         sit = self.situation(me, target, others, corner_ready)
-        play, calc = D.choose_play(sit, calc if target is not None else None, prev=self.last_play)
+        self.mode.update(me, th, z)
+        squad = self.mode.squad()
+        play, calc = D.choose_play(sit, calc if target is not None else None, prev=self.last_play, squad=squad)
+        if squad and PF.on("squad_no_break"):
+            play = self._lose_rule(me, play, target, calc, enemies, sit, corner_ready)
         slack = self.mv.slack(me, z)
         dec.threat_yaw = self.danger_yaw(me)
         lt = self.laser_threat(me)
