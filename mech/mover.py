@@ -42,6 +42,10 @@ class Mover:
         self.hop = None               # routing.Hop in flight (jump-and-jet route edges, main)
         self.hop_fol = None
         self.hops_banned = 0
+        self.backoff = None           # (until, (dx, dy)): stepping away from what stopped us
+        self.stuck_spots = []         # (t, x, y) of each back-off, to notice the same wall twice
+        self.bad_goals = []           # (x, y, until): goals we twice failed to walk to
+        self.backoffs = 0
         self.anchor = None
         self.escape = None
         self.note = ""
@@ -124,6 +128,8 @@ class Mover:
         """Ask for a route to `goal` (x, y). Keeps following the old route until the new one is ready."""
         if goal is None:
             return
+        if self.goal_bad(goal, me.t, 3.0):
+            return
         same = self.goal is not None and math.hypot(goal[0] - self.goal[0], goal[1] - self.goal[1]) <= replan_dist \
             and tag == self.goal_tag and self.route is not None
         pending = self.planner is not None and self.plan_goal is not None and \
@@ -179,6 +185,14 @@ class Mover:
             res = self._fly_hop(me)
             if res is not None:
                 return res
+        # 0b. stepping back from something that stopped us (see _start_backoff)
+        if self.backoff is not None:
+            until, d = self.backoff
+            if t < until:
+                self.note = "back off"
+                return [d[0], d[1]], False, False
+            self.backoff = None
+            self.stuck.reset()
         # 1. islands: low roofs, the stadium bowl, anywhere the grid says we cannot walk out
         #    (unless a route with hops is taking us across one)
         nf = w.nearest_free(x, y, 3)
@@ -240,6 +254,13 @@ class Mover:
             boost = self.booster.want(True, me.energy)
             self.last_move = move
             st = self.stuck.update(t, x, y, True)
+            if st >= 3 or (st >= 1 and not me.grounded and abs(me.vel[2]) < 0.3
+                           and math.hypot(me.vel[0], me.vel[1]) < 0.3):
+                # stopped by a wall the tables do not show, or hanging in the air against it
+                self.stuck_spots = [e for e in self.stuck_spots if t - e[0] < 25.0] + [(t, x, y)]
+                self._start_backoff(me, move)
+                self.note = "zone run: back off"
+                return list(self.backoff[1]), False, False
             jump, boost = self._unstick(st, me, jump, boost)
             if not me.grounded and boost and not self._jet_needed(me, move):
                 boost = False       # in the air, boosting is jetting: only to clear a ledge
@@ -313,15 +334,28 @@ class Mover:
         boost = self.booster.want(speed == "boost" and math.hypot(*move) > 0.5, me.energy)
         self.last_move = move
         st = self.stuck.update(t, x, y, commanded)
-        if st >= 3 and self.goal is not None:
-            # replan from where we are, after a sidestep
+        hung = st >= 1 and not me.grounded and abs(me.vel[2]) < 0.3 and math.hypot(me.vel[0], me.vel[1]) < 0.3
+        if (st >= 3 or hung) and self.goal is not None:
+            # back off from what stopped us, then replan; the second time at the same wall the goal
+            # is given up for 30 s (sandbox seeds 6, 17, 20: replanning the same route into the same
+            # wall held candidate 1 there 20-50 s; hanging in the air against a wall never ends
+            # while we keep pushing into it)
             g, tag = self.goal, self.goal_tag
+            again = any(t - ts < 25.0 and math.hypot(x - sx, y - sy) < 8.0 for ts, sx, sy in self.stuck_spots)
+            self.stuck_spots = [e for e in self.stuck_spots if t - e[0] < 25.0] + [(t, x, y)]
+            self._start_backoff(me, move)
             self.route = None
             self.fol = None
             self.goal = None
-            self.go(g, me, zone, tag=tag)
-            self.stuck.reset()
             self.replans += 1
+            if again:
+                self.bad_goals = [b for b in self.bad_goals if b[2] > t] + [(g[0], g[1], t + 30.0)]
+                self.planner = None
+                self.plan_goal = None
+            else:
+                self.go(g, me, zone, tag=tag)
+            self.note = "back off"
+            return list(self.backoff[1]), False, False
         jump, boost = self._unstick(st, me, jump, boost)
         if boost and not me.grounded and not self._jet_needed(me, move):
             # in the air the boost button is the jets: running speed is not wanted up there
@@ -336,6 +370,28 @@ class Mover:
             if self._jet_needed(me, mv):
                 boost = True
         return jump, boost
+
+    def _start_backoff(self, me, move):
+        """Step away for 0.8 s: the most open direction our tables show, from straight back to
+        square across what we were pushing into (no move at all if none is open: then we drop)."""
+        x, y = me.pos[0], me.pos[1]
+        mx, my = move[0], move[1]
+        n = math.hypot(mx, my)
+        base = math.atan2(my, mx) if n > 0.1 else me.yaw
+        self.backoffs += 1
+        side = 1 if self.backoffs % 2 else -1
+        d = (0.0, 0.0)
+        for deg in (180, 135 * side, -135 * side, 90 * side, -90 * side):
+            a = base + math.radians(deg)
+            ux, uy = math.cos(a), math.sin(a)
+            if self.w.walkable(x, y, x + ux * 5.0, y + uy * 5.0, need=2.6, skip_start=0.5):
+                d = (ux, uy)
+                break
+        self.backoff = (me.t + 0.8, d)
+
+    def goal_bad(self, p, t, r=6.0):
+        """A goal we twice failed to walk to in the last 30 s (tactics skips it)."""
+        return any(b[2] > t and math.hypot(p[0] - b[0], p[1] - b[1]) < r for b in self.bad_goals)
 
     def _jet_needed(self, me, move, look=4.0, max_climb=14.0):
         """Jet only while the feet are below the top of what is in front of us, and only when that

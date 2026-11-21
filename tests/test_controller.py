@@ -50,15 +50,19 @@ class ZoneOverrideTests(unittest.TestCase):
         bot = Bot(hello(), world=w)
         bot.tactics.opening_done = True
         me = (300.0, -60.0)
+        acts = []
         for k in range(30):
             t = 100.0 + 0.1 * k
             obs = self_obs(pos=(me[0], me[1], w.floor(*me)), t=t)
             # next circle 330 m west, 10 s before it closes: walking there is impossible, so run
             obs["zone"] = {"center": [41.3, -72.8], "radius": 560, "next_center": [-60.0, -60.0], "next_radius": 30,
                            "shrink_start": 60, "shrink_end": 110, "dps": 20}
-            a = bot.act(obs)
-        self.assertLess(a["move"][0], -0.5)       # heading west
-        self.assertTrue(a["boost"])
+            acts.append(bot.act(obs))
+        # the position is frozen in this test, so after about 2.5 s the mover rightly backs off as if
+        # stuck: judge the run before that
+        run = acts[10:24]
+        self.assertTrue(all(a["move"][0] < -0.5 for a in run), [a["move"] for a in run])   # heading west
+        self.assertTrue(all(a["boost"] for a in run))
 
 
 if __name__ == "__main__":

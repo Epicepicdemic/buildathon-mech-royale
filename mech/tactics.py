@@ -381,12 +381,17 @@ class Tactics:
         key = (z.version, round(cx), round(cy))
         dwell = 16.0 if (self.th.alive is None or self.th.alive >= 4) else 22.0
         if self.hold_goal is not None and key == self.hold_key and me.t - self.hold_t < dwell \
-                and math.hypot(self.hold_goal[0] - cx, self.hold_goal[1] - cy) <= rs:
+                and math.hypot(self.hold_goal[0] - cx, self.hold_goal[1] - cy) <= rs \
+                and not self.mv.goal_bad(self.hold_goal, me.t):
             return self.hold_goal
         threats = self.th.threat_points(me, 20.0)
         drones = [tr.home for tr in self.th.npcs() if tr.home is not None]
-        n = P.choose_hold(self.w, me.xy, (cx, cy, max(2.0, rs - 4.0)), threats, self.rng,
-                          drones=drones, alive=self.th.alive)
+        n = None
+        for _ in range(4):
+            n = P.choose_hold(self.w, me.xy, (cx, cy, max(2.0, rs - 4.0)), threats, self.rng,
+                              drones=drones, alive=self.th.alive)
+            if n is None or not self.mv.goal_bad(self.w.node_xy(n), me.t):
+                break
         if n is None or not self.w.main[n]:
             n = self.w.nearest_main(cx, cy, 32)
         self.hold_goal = self.w.node_xy(n) if n is not None else (cx, cy)
@@ -442,6 +447,8 @@ class Tactics:
         best = None
 
         def zone_ok(px, py):
+            if self.mv.goal_bad((px, py), me.t):
+                return False            # twice stopped on the way there (mover back-off)
             if z.margin_at(px, py, me.t + 2.0) < 0.0 and math.hypot(px - cx, py - cy) > rs:
                 return False
             if slack < 22.0 and math.hypot(px - cx, py - cy) > rs + 8.0:
@@ -1138,7 +1145,7 @@ class Tactics:
             if p is None:
                 continue
             dist = math.hypot(p[0] - me.pos[0], p[1] - me.pos[1])
-            if dist > 180.0 or math.hypot(p[0] - cx, p[1] - cy) > rs:
+            if dist > 180.0 or math.hypot(p[0] - cx, p[1] - cy) > rs or self.mv.goal_bad(p, me.t):
                 continue
             eta = dist / 11.5
             if d.get("lands_in", 0) > eta + 10.0:
