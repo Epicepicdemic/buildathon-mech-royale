@@ -112,7 +112,10 @@ class Bot:
                 action["drop"] = drop
         if dec.pick is not None:
             action["pick"] = dec.pick
-        label = (dec.label or "")[:40]
+        label = (dec.label or "")
+        if self.tactics.mode.squad():
+            label = "S " + label            # squad-practice profile on (mech/profile.py)
+        label = label[:40]
         if label != self.last_label:
             action["debug"] = {"label": label}
             self.last_label = label

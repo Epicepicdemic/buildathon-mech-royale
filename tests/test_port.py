@@ -129,6 +129,7 @@ class IsolateTests(unittest.TestCase):
     def test_two_attackers_from_opposite_sides_trigger_isolation(self):
         w = world()
         bot = Bot(hello(), world=w)
+        bot.tactics.mode.locked = True      # a free-for-all (this pins free-for-all behaviour)
         me = (419.0, -230.0)
         a, b = (439.8, -152.7), (422.0, -309.9)
         ya = math.atan2(me[1] - a[1], me[0] - a[0])
@@ -151,6 +152,7 @@ class ReloadTests(unittest.TestCase):
     def test_reloads_behind_cover_when_it_is_close(self):
         w = world()
         bot = Bot(hello(), world=w)
+        bot.tactics.mode.locked = True      # a free-for-all (this pins free-for-all behaviour)
         me = (-135.0, -166.0)
         ex, ey = -146.4, -214.7
         yaw_to = math.atan2(ey - me[1], ex - me[0])

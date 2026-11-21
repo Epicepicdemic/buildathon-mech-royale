@@ -15,6 +15,8 @@ touches the network or the clock, so each piece can be tested by feeding it a Si
 """
 import math
 
+from . import profile as PF
+
 from .ballistics import reversal_range
 from .geom import angdiff, bearing
 
@@ -23,6 +25,9 @@ ASSAULT, CORNER, HARASS, BREAK, REPOSITION = "assault", "corner", "harass", "bre
 ASSAULT_RATIO = 1.5
 EVEN_RATIO = 0.72
 NEAR_OTHERS_M = 160.0
+FINISH_TARGET_HP = 0.38     # finish_close: the target under this share of HP ...
+FINISH_OWN_HP = 0.42        # ... us over this ...
+FINISH_M = 20.0             # ... closes to this
 HYST = 0.2
 CORNER_TAKE = 0.72      # from a corner we fight unless the calculation says we clearly lose
 
@@ -266,6 +271,13 @@ class Assault:
         if getattr(e, "has", lambda k: False)("lightning") and "lightning" not in sit.me_weapons:
             # never walk into a 240-DPS lightning cone when we outrange it with gun/laser
             want = max(want, 58.0)
+        if PF.on("finish_close"):
+            # finish a weak target from close (recon/rea-mech-royale.md P2): it under 38% HP, us over
+            # 42%, at most two others near
+            e_hp = e.hp_frac() if hasattr(e, "hp_frac") else 1.0
+            if e_hp < FINISH_TARGET_HP and sit.me_hp / max(sit.me_max_hp, 1.0) > FINISH_OWN_HP \
+                    and len(sit.others) <= 2:
+                want = FINISH_M
         if dist > want:
             # approach: toward the rear side when it is not looking at us
             if not getattr(e, "sees_us", True):
@@ -398,8 +410,11 @@ def retreating(sit, enemy):
     return radial > 2.0 or not getattr(enemy, "los", True)
 
 
-def choose_play(sit, calc=None, prev=None):
-    """Pick one of the five plays for this decision. Returns (play name, FightCalc or None)."""
+def choose_play(sit, calc=None, prev=None, squad=False):
+    """Pick one of the five plays for this decision. Returns (play name, FightCalc or None).
+    `squad` (mech/profile.py, squad_no_break): against the practice squad, which shares vision so
+    hiding buys nothing, a second mech within 160 m and HP under 30% are not reasons to break; the
+    tactics layer retreats only after 1.5 s of clearly losing."""
     e = sit.enemy
     if e is None:
         if sit.unseen_hit:
@@ -419,6 +434,8 @@ def choose_play(sit, calc=None, prev=None):
     # hit from somewhere we cannot see, and nothing in front of us to answer
     if sit.unseen_hit and not getattr(e, "los", True):
         return BREAK, calc
+    if squad and PF.on("squad_no_break"):
+        hostile_others = []
     if hostile_others:
         # finish a dying target fast; else isolate from a corner; else fighting retreat to cover
         if calc.finishable and calc.ratio >= 0.75 and hp_frac > 0.28:
@@ -426,7 +443,7 @@ def choose_play(sit, calc=None, prev=None):
         if calc.ratio_corner >= 0.85 and sit.corner:
             return CORNER, calc
         return BREAK, calc
-    if hp_frac < 0.3 and not calc.finishable:
+    if hp_frac < 0.3 and not calc.finishable and not (squad and PF.on("squad_no_break")):
         return BREAK, calc
     a_thr = ASSAULT_RATIO - (HYST if prev == ASSAULT else 0.0) + (HYST if prev == CORNER else 0.0)
     e_thr = EVEN_RATIO - (HYST if prev in (CORNER, ASSAULT) else 0.0) + (HYST if prev == BREAK else 0.0)
