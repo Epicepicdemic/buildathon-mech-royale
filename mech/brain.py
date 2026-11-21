@@ -73,7 +73,7 @@ class Bot:
             self.mover.work(me, self.zone, min(end, time.perf_counter() + 0.005))
         self.mover.work(me, self.zone, end - 0.0015)
         self.cover.run(end - 0.0005)
-        for srch in (self.tactics.opening_search, self.tactics.second_search):
+        for srch in (self.tactics.iso_search, self.tactics.opening_search, self.tactics.second_search):
             if srch is not None and not srch.done and time.perf_counter() < end:
                 srch.run(end)
         # ---- legs: an air manoeuvre, a straight walk on a roof, or the mover

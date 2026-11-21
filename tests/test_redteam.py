@@ -110,6 +110,41 @@ class AirTests(unittest.TestCase):
         self.assertTrue(any(a["fire"][0] for a in acts))
 
 
+class SquadTests(unittest.TestCase):
+    """The red team's squad spreads round us so one bot is always behind whatever we face: fight
+    them one at a time from a spot hidden from all of them but one."""
+
+    def test_isolate_spot_hides_from_the_others_and_sees_the_primary(self):
+        from mech.cover import IsolateSearch, hidden_at, shot_from
+        w = world()
+        start = w.nearest_free(20.0, -85.0, 5)
+        other = (20.0, -185.0, w.floor(20.0, -185.0) + 8.0)
+        prim = (20.0, 15.0, w.floor(20.0, 15.0) + 4.5)
+        srch = IsolateSearch(w, start, prim, [other])
+        srch.run(1e18)
+        self.assertIsNotNone(srch.result)
+        n = srch.result[0]
+        self.assertTrue(hidden_at(w, n, [other]))
+        self.assertTrue(shot_from(w, n, prim))
+
+    def test_two_attackers_from_opposite_sides_trigger_isolation(self):
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.opening_done = True
+        # both attackers have a line of fire here; a spot hidden from one exists within 45 m
+        me = (419.0, -230.0)
+        a, b = (439.8, -152.7), (422.0, -309.9)
+        ya = math.atan2(me[1] - a[1], me[0] - a[0])
+        yb = math.atan2(me[1] - b[1], me[0] - b[0])
+        mechs = lambda k: [enemy(8, a[0], a[1], w, ya), enemy(9, b[0], b[1], w, yb)]
+        hits = lambda k: [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": ya + math.pi, "by": 8},
+                          {"type": "damaged", "amount": 45, "weapon": "gun", "bearing": yb + math.pi, "by": 9}]
+        acts = run(bot, me, 120.0, 10, mechs, events_fn=hits)
+        labels = [a.get("debug", {}).get("label", "") for a in acts]
+        self.assertTrue(any(l.startswith("isolate") for l in labels), labels)
+        self.assertTrue(any(a["fire"][0] for a in acts))
+
+
 class RearWatchTests(unittest.TestCase):
     def test_torso_sweeps_when_nothing_is_known(self):
         """Walking with no threat known, the torso turns through every direction within a few

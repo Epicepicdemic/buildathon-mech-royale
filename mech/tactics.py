@@ -11,7 +11,7 @@ import time
 from . import air as A
 from . import doctrine as D
 from . import positions as P
-from .cover import HideSearch, LowExposureSearch
+from .cover import HideSearch, IsolateSearch, LowExposureSearch
 from .geom import angdiff, bearing, wrap
 from .gunner import Target
 
@@ -75,6 +75,10 @@ class Tactics:
         self.hold_dur = 20.0
         self.play_others = 0
         self.play_target = None
+        self.iso = None              # (node, path) hidden from all attackers but one
+        self.iso_search = None
+        self.iso_key = None
+        self.iso_t = -1e9
         self.healing = False
         self.drop_target = None
         self.look_phase = 0.0
@@ -168,6 +172,49 @@ class Tactics:
         if self._dist(me, e) > 100.0 or e.hp > 330.0:
             return False
         return not any(o.sees_us for o in enemies if o is not e)
+
+    def _isolate(self, me, dec, enemies):
+        """Two or more mechs with a line of fire on us from bearings more than 60 degrees apart:
+        walk to the nearest spot (within 45 m) hidden from all of them but one, and fight that one."""
+        t = me.t
+        sh = self.shooters(me)
+        if len(sh) < 2:
+            self.iso = None
+            self.iso_search = None
+            return False
+        bs = [bearing(me.pos, e.est_pos(t)) for e in sh]
+        if max(angdiff(a, b) for a in bs for b in bs) < 1.05:
+            return False
+        cur = dec.target.track if dec.target is not None else None
+        prim = cur if cur in sh else min(sh, key=lambda e: self._dist(me, e) + 0.05 * (e.hp or 1400.0))
+        others = [e for e in sh if e is not prim]
+        eyes = []
+        for e in others:
+            p = e.est_pos(t)
+            eyes.append((p[0], p[1], p[2] + 8.0))
+        pc = prim.est_pos(t)
+        key = (prim.id, tuple(sorted(e.id for e in others)), round(me.pos[0] / 8.0), round(me.pos[1] / 8.0))
+        if key != self.iso_key or (self.iso is None and self.iso_search is None and t - self.iso_t > 1.0):
+            start = self.w.nearest_free(me.pos[0], me.pos[1], 5)
+            if start is not None:
+                self.iso_search = IsolateSearch(self.w, start, (pc[0], pc[1], pc[2] + 4.5), eyes, height=me.height)
+                self.iso_key = key
+                self.iso_t = t
+                self.iso = None
+        if self.iso_search is not None and self.iso_search.done:
+            self.iso = self.iso_search.result
+            self.iso_search = None
+        if self.iso is None:
+            return False
+        node, path = self.iso
+        self.mv.go_path(path, "isolate")
+        dec.target = Target.from_track(prim, t, float((self.cfg.get("cubes") or {}).get("size_per_cube", 0.05)))
+        if dec.intent is not None:
+            dec.intent.fire = "long"
+            dec.intent.label = "isolate %d" % prim.id
+        dec.direct = None
+        dec.hold = False
+        return True
 
     def _worth_starting(self, me, e, enemies):
         if not e.in_obs:
@@ -425,7 +472,8 @@ class Tactics:
         # and dodge: long jink legs across its line of fire, boosting beyond 45 m while energy
         # lasts (mech/dodge.py: real bullets hit that 65/26/10% at 45-78/78-150/150+ m, against
         # 76/48/32% for version 2's short walking jink)
-        if not dec.hold or intent is None or intent.spot != "peek":
+        isolating = intent is not None and (intent.label or "").startswith("isolate")
+        if (not dec.hold or intent is None or intent.spot != "peek") and not isolating:
             dec.evasive = True
         if self._dist(me, best) >= 45.0 and me.energy > 35.0 and me.grounded and dec.speed != "silent":
             dec.speed = "boost"
@@ -604,6 +652,12 @@ class Tactics:
                 intent.fire = "long"
         else:
             self._reposition(me, obs, dec, watchers, slack)
+        # ---------------- several attackers from different sides: fight them one at a time
+        if play in (D.ASSAULT, D.CORNER, D.BREAK):
+            self._isolate(me, dec, enemies)
+        else:
+            self.iso = None
+            self.iso_search = None
         # ---------------- counters to what beats cover and dodging
         self._counter_laser(me, dec, lt, enemies)
         self._counter_mortar(me, dec)
