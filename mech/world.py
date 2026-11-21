@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PATH = os.path.join(os.path.dirname(HERE), "worlddata", "world.bin")
 
 SQRT2 = math.sqrt(2.0)
-CANOPY_BLOCK_M = 4.0       # metres of crown along a sight line that hide a mech (0.35 density, 0.25 threshold)
+CANOPY_BLOCK_M = 3.96      # crown metres that hide: exp(-0.35 L) < 0.25 (canopyDensity, canopyBlockT)
 
 
 class World:
@@ -154,7 +154,8 @@ class World:
     # ------------------------------------------------------------- sight and shots
     def line_clear(self, ax, ay, az, bx, by, bz, step=1.0, canopy=False, skip_end=1.0):
         """True if nothing solid (buildings, terrain) cuts the segment a->b.
-        With canopy=True, also fails when the line runs through CANOPY_BLOCK_M of tree crown."""
+        With canopy=True, also fails when the line runs through CANOPY_BLOCK_M of tree crown
+        (crowns are ellipsoids, rasterised as a vertical chord per 1 m vertex)."""
         dx, dy, dz = bx - ax, by - ay, bz - az
         L = math.hypot(dx, dy)
         if L < 2 * skip_end + 0.01:
@@ -162,15 +163,16 @@ class World:
         n = int(L / step)
         inv = 1.0 / n
         nx = self.nx
+        ny = self.ny
         x0, y0 = self.x0, self.y0
         sd = self.sight_dm
         k0 = max(1, int(math.ceil(skip_end / L * n)))
         k1 = n - k0
         can = 0.0
-        seg = L / n
-        nu = self.nu
-        nv = self.nv
-        res = self.res
+        # crown metres along the 3D line per sample
+        seg = math.sqrt(L * L + dz * dz) / n
+        clo = self.can_lo
+        chi = self.can_hi
         for k in range(k0, k1 + 1):
             t = k * inv
             x = ax + dx * t
@@ -178,34 +180,31 @@ class World:
             z = az + dz * t
             i = int(x - x0 + 0.5)
             j = int(y - y0 + 0.5)
-            if i < 0 or j < 0 or i >= nx or j >= self.ny:
+            if i < 0 or j < 0 or i >= nx or j >= ny:
                 return False
-            if sd[j * nx + i] > z * 10.0:
+            idx = j * nx + i
+            zd = z * 10.0
+            if sd[idx] > zd:
                 return False
             if canopy:
-                cu = int((x - x0) / res + 0.5)
-                cv = int((y - y0) / res + 0.5)
-                if cu >= nu:
-                    cu = nu - 1
-                if cv >= nv:
-                    cv = nv - 1
-                m = cv * nu + cu
-                hi = self.can_hi[m]
-                if hi and self.can_lo[m] <= z * 10.0 <= hi:
+                hi = chi[idx]
+                if hi and clo[idx] <= zd <= hi:
                     can += seg
                     if can >= CANOPY_BLOCK_M:
                         return False
         return True
 
     def sees(self, eye, feet, height=9.0, near_range=45.0, step=1.0):
-        """Can an eye at `eye` see a mech standing at `feet` (centre or top)? Buildings, terrain,
-        and canopy beyond near_range block. Field of view is not considered here."""
-        d = math.hypot(feet[0] - eye[0], feet[1] - eye[1])
-        canopy = d > near_range
-        if self.line_clear(eye[0], eye[1], eye[2], feet[0], feet[1], feet[2] + height, step=step, canopy=canopy):
-            return True
-        return self.line_clear(eye[0], eye[1], eye[2], feet[0], feet[1], feet[2] + height * 0.5, step=step,
-                               canopy=canopy)
+        """Can an eye at `eye` see a mech standing at `feet` (centre or top)? Buildings and terrain
+        block; tree crowns block beyond near_range, measured in 3D from the eye to the point looked
+        at (the proximity sensors see through canopy). Field of view is not considered here."""
+        for h in (height, height * 0.5):
+            tz = feet[2] + h
+            ddx, ddy, ddz = feet[0] - eye[0], feet[1] - eye[1], tz - eye[2]
+            canopy = ddx * ddx + ddy * ddy + ddz * ddz > near_range * near_range
+            if self.line_clear(eye[0], eye[1], eye[2], feet[0], feet[1], tz, step=step, canopy=canopy):
+                return True
+        return False
 
     def shot_clear(self, a, b):
         """A straight shot from a to b is not stopped by buildings or terrain (trees stop no shots)."""

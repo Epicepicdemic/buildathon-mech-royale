@@ -8,7 +8,7 @@ so a rival reading this code cannot know in advance where we will stand.
 import math
 
 
-def score_cell(world, n, me_xy, circle, threats, small, drones=()):
+def score_cell(world, n, me_xy, circle, threats, small, drones=(), avoid=None):
     x, y = world.node_xy(n)
     cx, cy, r = circle
     expo = world.expo[n] / 255.0
@@ -26,6 +26,8 @@ def score_cell(world, n, me_xy, circle, threats, small, drones=()):
         dd = math.hypot(hx - x, hy - y)
         if dd < 60.0:
             s += (60.0 - dd) * 2.0         # NPC drones wake inside 45 m of their patch
+    if avoid is not None and math.hypot(avoid[0] - x, avoid[1] - y) < 25.0:
+        s += 45.0                          # not where we were last: a held spot is a known spot
     return s
 
 
@@ -33,7 +35,7 @@ MAX_CELLS = 700
 MAX_THREATS = 6
 
 
-def candidates(world, me_xy, circle, threats, max_from_me=260.0, max_expo=0.35, drones=()):
+def candidates(world, me_xy, circle, threats, max_from_me=260.0, max_expo=0.35, drones=(), avoid=None):
     cx, cy, r = circle
     small = r < 45.0
     # bounded work: the nearest few threats, and a stride that keeps the scan to about MAX_CELLS cells
@@ -60,7 +62,7 @@ def candidates(world, me_xy, circle, threats, max_from_me=260.0, max_expo=0.35, 
             x = world.x0 + u * res
             if (x - cx) ** 2 + (y - cy) ** 2 > r * r or abs(x - me_xy[0]) > max_from_me:
                 continue
-            out.append((score_cell(world, n, me_xy, circle, threats, small, drones), n))
+            out.append((score_cell(world, n, me_xy, circle, threats, small, drones, avoid), n))
     return out
 
 
@@ -80,9 +82,10 @@ def choose(scored, rng, top=6, temperature=30.0):
     return scored[-1][1]
 
 
-def choose_hold(world, me_xy, circle, threats, rng, top=6, drones=()):
-    """A node to hold inside `circle` (cx, cy, r), or None. `drones`: NPC home points to keep clear of."""
-    cands = candidates(world, me_xy, circle, threats, drones=drones)
+def choose_hold(world, me_xy, circle, threats, rng, top=6, drones=(), avoid=None):
+    """A node to hold inside `circle` (cx, cy, r), or None. `drones`: NPC home points to keep clear
+    of. `avoid`: the last spot held (cells near it score worse)."""
+    cands = candidates(world, me_xy, circle, threats, drones=drones, avoid=avoid)
     if not cands:
-        cands = candidates(world, me_xy, circle, threats, max_from_me=2000.0, max_expo=1.0, drones=drones)
+        cands = candidates(world, me_xy, circle, threats, max_from_me=2000.0, max_expo=1.0, drones=drones, avoid=avoid)
     return choose(cands, rng, top)

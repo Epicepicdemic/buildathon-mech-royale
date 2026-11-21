@@ -24,7 +24,15 @@ class ChoosePlayTests(unittest.TestCase):
     def test_hit_by_unseen_breaks(self):
         self.assertEqual(D.choose_play(sit(unseen=True))[0], D.BREAK)
         hidden = track(pos=(120, 0, 0), los=False, sees_us=True)
+        hidden.in_obs = False           # its position is not being reported: we cannot answer it
         self.assertEqual(D.choose_play(sit(hidden, unseen=True))[0], D.BREAK)
+
+    def test_hit_from_behind_trees_is_answered(self):
+        # the server still reports it (in_obs) but a crown hides it from our eye: shots pass
+        # through trees, so this is a fight, not a break
+        behind_trees = track(pos=(120, 0, 0), los=False, sees_us=False)
+        behind_trees.fire_line = True
+        self.assertNotEqual(D.choose_play(sit(behind_trees, unseen=True))[0], D.BREAK)
 
     def test_weak_enemy_is_assaulted(self):
         e = track(pos=(50, 0, 0), hp=300)
@@ -53,13 +61,28 @@ class ChoosePlayTests(unittest.TestCase):
         self.assertTrue(b.rear)
         self.assertGreater(b.our_dps, a.our_dps * 1.4)
 
-    def test_third_party_turns_an_assault_into_a_break(self):
+    def test_third_party_turns_an_assault_into_holding_ground(self):
+        # version 3: others nearby stop the charge but not the fight; their fire is in the ratio
         e = track(5, pos=(40, 0, 0), hp=1100)
         play, _ = D.choose_play(sit(e, kinds=("gun", "lightning")))
         self.assertEqual(play, D.ASSAULT)
         o1 = track(6, pos=(60, 60, 0), weapons=("gun", "laser"))
         o2 = track(7, pos=(-50, 70, 0), weapons=("gun",))
         play, calc = D.choose_play(sit(e, others=[o1, o2], kinds=("gun", "lightning")))
+        self.assertEqual(play, D.CORNER)
+        self.assertGreater(calc.ratio, 1.0)
+
+    def test_near_others_alone_is_not_a_break(self):
+        e = track(5, pos=(70, 0, 0), hp=1400)
+        o1 = track(6, pos=(150, 20, 0), sees_us=False)
+        play, calc = D.choose_play(sit(e, others=[o1]))
+        self.assertNotEqual(play, D.BREAK)
+
+    def test_outgunned_breaks(self):
+        e = track(5, pos=(120, 0, 0), hp=1400, weapons=("gun", "laser"))
+        others = [track(6 + k, pos=(100, 40 * (k - 1), 0), weapons=("gun", "laser")) for k in range(3)]
+        play, calc = D.choose_play(sit(e, others=others, hp=600))
+        self.assertLess(calc.ratio, D.EVEN_RATIO)
         self.assertEqual(play, D.BREAK)
 
     def test_third_party_with_corner_keeps_a_corner_fight(self):

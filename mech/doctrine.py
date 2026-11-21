@@ -20,11 +20,13 @@ from .geom import angdiff, bearing
 
 ASSAULT, CORNER, HARASS, BREAK, REPOSITION = "assault", "corner", "harass", "break", "reposition"
 
-ASSAULT_RATIO = 1.5
-EVEN_RATIO = 0.8
+ASSAULT_RATIO = 1.4
+EVEN_RATIO = 0.6        # version 2 broke below 0.8 and then held fire: version 3 fights to 0.6
 NEAR_OTHERS_M = 160.0
 HYST = 0.2
-CORNER_TAKE = 0.85      # from a corner we fight unless the calculation says we clearly lose
+CORNER_TAKE = 0.7       # from a corner we fight unless the calculation says we clearly lose
+FINISH_RATIO = 0.7      # a target we can finish with one burst is attacked unless we clearly lose
+LOW_HP = 0.25           # below this we break only if we are also losing
 
 
 # ---------------------------------------------------------------------------- weapon numbers
@@ -385,8 +387,15 @@ def choose_play(sit, calc=None, prev=None):
     `prev` is last decision's play: thresholds move by HYST in its favour so that a ratio sitting
     on a boundary does not flip the play every tick.
 
-    `calc.ratio` is the open-ground ratio (their time to kill us / our time to kill them);
-    `calc.ratio_corner` assumes we fight from a corner and are exposed half the time."""
+    `calc.ratio` is the open-ground ratio (their time to kill us / our time to kill them), and it
+    already counts every other mech shooting at us (`others`); `calc.ratio_corner` assumes we
+    fight from a corner and are exposed half the time.
+
+    Version 3 (the red team's squad finding): this bot fights. Other mechs being near is not by
+    itself a reason to break, low HP alone is not, and a break never means holding fire while
+    something can still hit us (the tactics layer keeps the torso and the gun on it). We break
+    when the calculation says we clearly lose, when we cannot hurt the target, or when something
+    we cannot locate is hitting us."""
     e = sit.enemy
     if e is None:
         if sit.unseen_hit:
@@ -397,21 +406,21 @@ def choose_play(sit, calc=None, prev=None):
     hp_frac = sit.me_hp / max(sit.me_max_hp, 1.0)
     if calc.our_dps <= 1e-6:
         return BREAK, calc
-    # hit from somewhere we cannot see, and nothing in front of us to answer
-    if sit.unseen_hit and not getattr(e, "los", True):
+    # hit from somewhere we cannot locate, and nothing in front of us to answer
+    if sit.unseen_hit and not getattr(e, "in_obs", True):
         return BREAK, calc
-    if near_others:
-        # a third party changes everything: finish a dying target, else fight only from a corner
-        if calc.finishable and calc.ratio >= 1.0 and hp_frac > 0.3:
-            return ASSAULT, calc
-        if calc.ratio_corner >= 1.0 and sit.corner:
-            return CORNER, calc
-        return BREAK, calc
-    if hp_frac < 0.3 and not calc.finishable:
-        return BREAK, calc
+    if calc.finishable and calc.ratio >= FINISH_RATIO:
+        return ASSAULT, calc
     a_thr = ASSAULT_RATIO - (HYST if prev == ASSAULT else 0.0) + (HYST if prev == CORNER else 0.0)
     e_thr = EVEN_RATIO - (HYST if prev in (CORNER, ASSAULT) else 0.0) + (HYST if prev == BREAK else 0.0)
-    if calc.ratio >= a_thr or (calc.finishable and calc.ratio >= 1.0):
+    if near_others:
+        # a third party: hold ground and fight (no charging in), from a corner when we have one
+        if calc.ratio >= e_thr or (sit.corner and calc.ratio_corner >= CORNER_TAKE):
+            return CORNER, calc
+        return BREAK, calc
+    if hp_frac < LOW_HP and calc.ratio < 1.0:
+        return BREAK, calc
+    if calc.ratio >= a_thr:
         return ASSAULT, calc
     # from cover, a roughly even fight is taken: hunters come anyway, and running shows them our back
     if calc.ratio >= e_thr or (sit.corner and calc.ratio_corner >= CORNER_TAKE + (HYST if prev == BREAK else 0.0)):
@@ -434,7 +443,7 @@ def pick_target(sit_factory, enemies, t, me_pos):
         sit = sit_factory(e)
         calc = FightCalc(sit, e)
         score = calc.ratio
-        visible = getattr(e, "los", False)
+        visible = e.shootable() if hasattr(e, "shootable") else getattr(e, "los", False)
         if not visible:
             score *= 0.35            # a memory or a sound: anything we can actually shoot comes first
         if e.engaged_elsewhere(t) if hasattr(e, "engaged_elsewhere") else False:

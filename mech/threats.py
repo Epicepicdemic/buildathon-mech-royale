@@ -17,7 +17,8 @@ class Track:
     __slots__ = ("id", "kind", "pos", "vel", "yaw", "pitch", "hp", "max_hp", "cubes", "weapons", "charging",
                  "t_seen", "t_first", "in_obs", "los", "sees_us", "dead", "phantom", "hist", "dmg_to_us",
                  "t_hit_us", "t_we_hit", "dmg_from_us", "t_hp_drop_other", "t_fired_other", "t_heard",
-                 "heard_kind", "home", "aggro", "t_reload_heard", "hp_prev", "t_fired")
+                 "heard_kind", "home", "aggro", "t_reload_heard", "hp_prev", "t_fired", "fire_line", "t_aimed_at_us",
+                 "t_first_engaged")
 
     def __init__(self, tid, kind, t):
         self.id = tid
@@ -52,6 +53,9 @@ class Track:
         self.t_reload_heard = -1e9
         self.hp_prev = None
         self.t_fired = -1e9
+        self.fire_line = False        # in the observation and no building or terrain between muzzles
+        self.t_aimed_at_us = -1e9     # last time it was in view with its torso on us
+        self.t_first_engaged = None   # first time it shot at us or aimed at us from within range
 
     # ------------------------------------------------------------------ estimates
     def age(self, t):
@@ -96,6 +100,15 @@ class Track:
 
     def still(self):
         return math.hypot(self.vel[0], self.vel[1]) < 1.5
+
+    def shootable(self):
+        """We know where it is (the server reports its true position) and a shot would reach it:
+        trees stop no shots, so only buildings and terrain count."""
+        return self.in_obs and self.fire_line
+
+    def engaging(self, t, window=4.0):
+        """It is fighting us: it hit us lately, or it is in view with its torso on us."""
+        return t - self.t_hit_us <= window or t - self.t_aimed_at_us <= 1.0
 
     def recently_hit_us(self, t, window=3.0):
         return t - self.t_hit_us <= window
@@ -217,6 +230,7 @@ class Threats:
             if not tr.in_obs:
                 tr.los = False
                 tr.sees_us = False
+                tr.fire_line = False
                 tr.charging = False if t - tr.t_seen > 1.0 else tr.charging
         # sight estimates for the ones in the observation (memory entries may be out of view)
         if self.w is not None:
@@ -226,13 +240,22 @@ class Threats:
                 if d > 260:
                     tr.los = False
                     tr.sees_us = False
+                    tr.fire_line = False
                     continue
                 h = 9.0 if tr.kind == "mech" else 3.5
                 tr.los = self.w.sees(eye, tr.pos, h, self.near_range)
+                # a shot at its centre, or failing that its upper body, is not stopped by a wall
+                tr.fire_line = self.w.shot_clear(me.muzzle, (tr.pos[0], tr.pos[1], tr.pos[2] + h * 0.5)) or \
+                    self.w.shot_clear(me.muzzle, (tr.pos[0], tr.pos[1], tr.pos[2] + h * 0.8))
                 if tr.los:
                     # does it see us? (its eye, its facing)
-                    in_wedge = angdiff(tr.yaw, math.atan2(my - tr.pos[1], mx - tr.pos[0])) <= self.fov / 2 + 0.05
+                    to_us = math.atan2(my - tr.pos[1], mx - tr.pos[0])
+                    in_wedge = angdiff(tr.yaw, to_us) <= self.fov / 2 + 0.05
                     tr.sees_us = d <= self.near_range or (in_wedge and d <= self.vis_range)
+                    if tr.kind == "mech" and d <= 235.0 and angdiff(tr.yaw, to_us) <= max(0.12, math.atan2(6.0, d)):
+                        tr.t_aimed_at_us = t
+                        if tr.t_first_engaged is None:
+                            tr.t_first_engaged = t
                 else:
                     tr.sees_us = False
         self._events(obs, me)
@@ -290,6 +313,8 @@ class Threats:
                 if wpn in ("gun", "laser", "lightning", "mortar") and wpn not in tr.weapons:
                     tr.weapons.append(wpn)
                 tr.t_hit_us = t
+                if tr.t_first_engaged is None:
+                    tr.t_first_engaged = t
                 tr.dmg_to_us.append((t, amt))
                 if len(tr.dmg_to_us) > 40:
                     del tr.dmg_to_us[:-40]
@@ -447,8 +472,9 @@ class Threats:
         return sum(a for (tt, a, w) in self.dmg_taken if t - tt <= window)
 
     def unseen_attacker(self, t, window=2.0):
-        """We were hit recently by something we cannot see."""
+        """We were hit recently by something whose position we do not know (not in the
+        observation). A mech the server is still reporting is not unseen: we can shoot back."""
         for tr in self.tracks.values():
-            if t - tr.t_hit_us <= window and not tr.los:
+            if t - tr.t_hit_us <= window and not tr.in_obs:
                 return tr
         return None

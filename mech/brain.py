@@ -85,8 +85,9 @@ class Bot:
             move = [dx / d, dy / d] if d > 0.8 else [0.0, 0.0]
             boost, jump = False, False
         else:
+            exposed = any(tr.sees_us for tr in self.threats.tracks.values() if tr.in_obs and tr.kind == "mech")
             move, boost, jump = self.mover.steer(me, self.zone, dec.speed, dec.evasive, dec.threat_yaw, dec.hold,
-                                                 shells=self.threats.projectiles)
+                                                 shells=self.threats.projectiles, exposed=exposed)
         move_yaw = math.atan2(move[1], move[0]) if math.hypot(move[0], move[1]) > 0.3 else None
         # ---- torso and triggers
         obstacles = [tr for tr in self.threats.tracks.values() if tr.in_obs and not tr.dead]

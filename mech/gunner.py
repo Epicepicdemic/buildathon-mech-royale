@@ -26,9 +26,11 @@ class Target:
     @staticmethod
     def from_track(tr, t, size_per_cube=0.05):
         s = 1.0 + size_per_cube * (tr.cubes or 0)
+        # `visible`: the server reports its true position (in the observation). Whether a shot gets
+        # there is the gunner's shot-line check: trees stop no shots, so sight is not required.
         if tr.kind == "npc":
-            return Target(tr.id, "npc", tr.est_pos(t), tr.vel, 1.8, 3.5, tr.los, tr)
-        return Target(tr.id, "mech", tr.est_pos(t), tr.vel, 2.5 * s, 9.0 * s, tr.los, tr)
+            return Target(tr.id, "npc", tr.est_pos(t), tr.vel, 1.8, 3.5, tr.in_obs, tr)
+        return Target(tr.id, "mech", tr.est_pos(t), tr.vel, 2.5 * s, 9.0 * s, tr.in_obs, tr)
 
     def center(self):
         return (self.pos[0], self.pos[1], self.pos[2] + self.height * 0.5)

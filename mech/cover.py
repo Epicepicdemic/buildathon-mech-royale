@@ -94,10 +94,10 @@ class PeekSearch(nav.NearestSearch):
 class LowExposureSearch(nav.NearestSearch):
     """Nearest node with low exposure and walls close around (the opening when nothing is known)."""
 
-    def __init__(self, world, start, max_expo=0.10, min_arc=0.25, max_cost=140.0):
+    def __init__(self, world, start, max_expo=0.10, min_arc=0.25, max_cost=140.0, rng=None):
         def pred(n):
             return world.main[n] and world.expo[n] <= max_expo * 255 and world.wall_arc(n) >= min_arc
-        super().__init__(world, start, pred, max_cost)
+        super().__init__(world, start, pred, max_cost, alts=4 if rng is not None else 1, alt_slack=14.0, rng=rng)
 
 
 class CoverState:
