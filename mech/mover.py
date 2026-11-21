@@ -55,7 +55,9 @@ class Mover:
             self.zf = nav.ZoneField(self.w, zone.next_center[0], zone.next_center[1], r, stay=stay)
             self.zf_key = key
         if not self.zf.done:
-            self.zf.run(deadline)
+            zf_dl = deadline - 0.003 if self.planner is not None else deadline
+            if time.perf_counter() < zf_dl:
+                self.zf.run(zf_dl)
         if self.planner is not None and time.perf_counter() < deadline:
             if self.planner.run(deadline):
                 res = self.planner.result
@@ -193,12 +195,18 @@ class Mover:
                 fol = routing.Follower(w, pts)
                 tx, ty, rem, off = fol.target(x, y)
                 move = unit(tx - x, ty - y)
+                bdodge = self._dodge_bullets(me, shells, move, forward_weight=0.75)
+                if bdodge is not None:
+                    move = bdodge
+                sdodge, _ = self._dodge_shells(me, shells)
+                if sdodge is not None:
+                    move = unit(move[0] * 0.45 + sdodge[0] * 0.85, move[1] * 0.45 + sdodge[1] * 0.85)
                 boost = self.booster.want(True, me.energy)
                 st = self.stuck.update(t, x, y, True)
                 jump, boost = self._unstick(st, me, jump, boost)
                 self.note = "zone run"
                 return [move[0], move[1]], boost, jump
-        # 3. follow the route
+        # 3. follow the route (or step toward a pending goal while the planner finishes)
         commanded = False
         if self.fol is not None and not hold:
             tx, ty, rem, off = self.fol.target(x, y)
@@ -225,15 +233,32 @@ class Mover:
                     mode = routing.speed_mode(rem_enter, t, zone.deadline(), self.mob, me.energy, reserve=0.0)
                     if mode == "boost":
                         speed = "boost"
+        elif self.planner is not None and self.plan_goal is not None and not hold:
+            gx, gy = self.plan_goal
+            dg = math.hypot(gx - x, gy - y)
+            if dg > 1.5:
+                byaw = math.atan2(gy - y, gx - x)
+                for deg in (0, 35, -35, 70, -70):
+                    ux, uy = math.cos(byaw + math.radians(deg)), math.sin(byaw + math.radians(deg))
+                    if w.walkable(x, y, x + ux * 4.5, y + uy * 4.5, need=2.5, skip_start=1.5):
+                        move = (ux, uy)
+                        commanded = True
+                        break
         # 4. jinking under fire: irregular sidesteps across the enemy's line
         if evasive:
             move = self._jink(me, move, threat_yaw)
             commanded = commanded or math.hypot(*move) > 0.3
-        # 5. step off incoming mortar shells
-        dodge = self._dodge_shells(me, shells)
+        # 5. sidestep incoming gun/drone bullets & falling mortar shells
+        bdodge = self._dodge_bullets(me, shells, move)
+        if bdodge is not None:
+            move = bdodge
+            commanded = True
+        dodge, shell_urgent = self._dodge_shells(me, shells)
         if dodge is not None:
             move = dodge
             commanded = True
+            if shell_urgent and me.energy > 8.0:
+                speed = "boost"
         if speed == "silent":
             f = min(1.0, self.mob.silent / max(self.mob.walk, 0.1))
             move = (move[0] * f, move[1] * f)
@@ -297,7 +322,7 @@ class Mover:
         elif math.hypot(*move) > 0.1:
             px, py = -move[1], move[0]
         else:
-            return move
+            px, py = -math.sin(me.yaw), math.cos(me.yaw)
         s = self.jink_sign
         mx = move[0] * 0.6 + px * s * 0.8
         my = move[1] * 0.6 + py * s * 0.8
@@ -312,25 +337,96 @@ class Mover:
                 return move
         return u
 
+    def _dodge_bullets(self, me, shells, cur_move, forward_weight=0.45):
+        """Step perpendicular to the earliest incoming gun/npc bullet whose ray passes through us."""
+        if not shells:
+            return None
+        mx, my, mz = me.pos
+        hit_r = me.radius + 1.1
+        best = None
+        for p in shells:
+            if p.get("kind") not in ("gun", "npc"):
+                continue
+            pos = p.get("pos")
+            vel = p.get("vel")
+            if not pos or not vel:
+                continue
+            vx, vy, vz = vel[0], vel[1], vel[2]
+            sp2 = vx * vx + vy * vy
+            if sp2 < 100.0:
+                continue
+            rx, ry = mx - pos[0], my - pos[1]
+            tc = (rx * vx + ry * vy) / sp2
+            if tc < 0.06 or tc > 0.90:
+                continue
+            zc = pos[2] + vz * tc
+            if zc < mz - 1.0 or zc > mz + me.height + 1.0:
+                continue
+            sp = math.sqrt(sp2)
+            nx, ny = -vy / sp, vx / sp
+            lat = (rx - vx * tc) * nx + (ry - vy * tc) * ny
+            if abs(lat) < hit_r and (best is None or tc < best[0]):
+                best = (tc, nx, ny, lat)
+        if best is None:
+            return None
+        _, nx, ny, lat = best
+        if abs(lat) > 0.35:
+            sign = 1.0 if lat >= 0.0 else -1.0
+        else:
+            proj = cur_move[0] * nx + cur_move[1] * ny
+            sign = (1.0 if proj >= 0.0 else -1.0) if abs(proj) > 0.15 else float(self.jink_sign)
+        for s in (sign, -sign):
+            if s != sign and abs(lat) > 1.4:
+                break
+            u = unit(cur_move[0] * forward_weight + nx * s * 0.90, cur_move[1] * forward_weight + ny * s * 0.90)
+            if self.w.walkable(mx, my, mx + u[0] * 4.5, my + u[1] * 4.5, need=2.6, skip_start=1.0):
+                return u
+        return None
+
     def _dodge_shells(self, me, shells):
+        """Return (walkable_escape_unit_vec, is_urgent) for the soonest dangerous mortar shell."""
+        if not shells:
+            return None, False
         g = float(((self.cfg.get("weapons") or {}).get("mortar") or {}).get("gravity", 22.0))
+        mx, my, mz = me.pos
         best = None
         for p in shells:
             if p.get("kind") != "mortar":
                 continue
             px, py, pz = p["pos"]
             vx, vy, vz = p["vel"]
-            # time to fall to our floor level
-            dz = pz - me.pos[2]
+            dz = pz - mz
             disc = vz * vz + 2 * g * dz
             if disc < 0:
                 continue
             tl = (vz + math.sqrt(disc)) / g
             lx, ly = px + vx * tl, py + vy * tl
-            d = math.hypot(lx - me.pos[0], ly - me.pos[1])
-            if d < 10.0 and tl < 2.5 and (best is None or tl < best[0]):
-                best = (tl, lx, ly)
+            d = math.hypot(lx - mx, ly - my)
+            if d < 10.5 and 0.0 < tl < 2.6 and (best is None or tl < best[0]):
+                best = (tl, lx, ly, d)
         if best is None:
-            return None
-        return unit(me.pos[0] - best[1], me.pos[1] - best[2]) if math.hypot(me.pos[0] - best[1], me.pos[1] - best[2]) > 0.5 \
-            else (1.0, 0.0)
+            return None, False
+        tl, lx, ly, d0 = best
+        urgent = d0 < 8.5 and tl < 1.7
+        base_yaw = math.atan2(my - ly, mx - lx) if d0 > 0.3 else me.yaw
+        step_d = min(8.0, max(4.5, me.walk * min(tl, 0.7)))
+        c0 = self.w.clearance(mx, my)
+        skip = 1.0 if c0 >= 2.7 else 2.3
+        best_dir = None
+        for k in range(16):
+            deg = (k // 2 + (k & 1)) * 22.5 * (1 if k & 1 else -1) if k else 0.0
+            a = base_yaw + math.radians(deg)
+            ux, uy = math.cos(a), math.sin(a)
+            ok = self.w.walkable(mx, my, mx + ux * 5.5, my + uy * 5.5, need=2.5, skip_start=skip)
+            if not ok and c0 < 2.6:
+                # Pressed tight against a wall (e.g. (20,-85) with west wall at x=19): allow directions
+                # that stay out of buildings and strictly improve or keep wall clearance >= 2.2 m.
+                ok = all(self.w.sight(mx + ux * s, my + uy * s) <= mz + 1.6 for s in (1.5, 3.0, 5.0)) \
+                    and self.w.clearance(mx + ux * 4.0, my + uy * 4.0) >= max(2.2, c0)
+            if ok:
+                sep = math.hypot(mx + ux * step_d - lx, my + uy * step_d - ly)
+                if best_dir is None or sep > best_dir[0]:
+                    best_dir = (sep, (ux, uy))
+        if best_dir is not None:
+            return best_dir[1], urgent
+        return (math.cos(base_yaw), math.sin(base_yaw)), urgent

@@ -164,48 +164,44 @@ class AfterTheFightTests(unittest.TestCase):
 
 
 class OpeningTests(unittest.TestCase):
-    def run_opening(self, near_steps):
-        """From an open spawn: boost to cover, then on to a spot hidden from the spawn."""
+    def test_fights_visible_enemy_from_t_zero(self):
+        """At t = 0 with an enemy in sight and range, Line B locks torso on it and opens fire immediately."""
+        w = world()
+        bot = Bot(hello(), world=w)
+        me = (300.0, -60.0)
+        ex, ey = 385.0, -60.0
+        aim = [0.0, 0.0]
+        fired = False
+        for k in range(5):
+            t = 0.1 * k
+            obs = zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=t, aim=aim))
+            obs["mechs"] = [enemy(9, ex, ey, w, math.pi, weapons=("gun",))]
+            a = bot.act(obs)
+            aim = a["aim"]
+            fired = fired or a["fire"][0]
+        self.assertTrue(fired)
+        self.assertLess(abs(aim[0]), 0.1)
+
+    def test_boosts_to_loot_and_cover_at_t_zero_without_creeping(self):
+        """With no enemy in sight at t = 0, Line B immediately goes for visible loot/crates or boosts out
+        of open ground without wasting 35 s creeping silently."""
         from tools.kinesim import KMech
         w = world()
         bot = Bot(hello(), world=w)
         spawn = (300.0, -60.0)
         m = KMech(w, *spawn)
-        t = 0.0
-        labels = []
         speeds = []
-        for k in range(300):
+        for k in range(40):
+            t = 0.1 * k
             obs = zone_obs(self_obs(pos=(m.x, m.y, m.z), t=t, vel=(m.vx, m.vy, m.vz), energy=m.energy))
             obs["self"]["grounded"] = m.grounded
-            if near_steps and k % 5 == 0:
-                obs["sounds"] = [{"kind": "step", "bearing": 2.5, "dist": "near", "age": 0.1}]
+            obs["pickups"] = [{"id": 9001, "kind": "laser", "pos": [345.0, -60.0, w.floor(345, -60)]}]
             a = bot.act(obs)
-            lab = a.get("debug", {}).get("label")
-            if lab is not None:
-                labels.append(lab)
-            if bot.tactics.second_goal is not None and "second" in (labels[-1] if labels else ""):
-                speeds.append(math.hypot(m.vx, m.vy))
             m.decide(a["move"], a["boost"], a["jump"])
-            t += 0.1
-            if bot.tactics.opening_done:
-                break
-        return bot, spawn, labels, speeds
-
-    def test_hides_then_moves_on_to_a_second_spot_the_spawn_cannot_see(self):
-        w = world()
-        bot, spawn, labels, speeds = self.run_opening(False)
-        self.assertIn("opening: cover", labels)
-        self.assertIn("opening: second", labels)
-        sg = bot.tactics.second_goal
-        self.assertIsNotNone(sg)
-        self.assertFalse(w.sees((spawn[0], spawn[1], w.floor(*spawn) + 8.0), (sg[0], sg[1], w.floor(*sg)), 9.0))
-        # nobody within earshot (steps carry 40 m): it walks at full speed rather than creeping in the open
-        self.assertGreater(max(speeds), 9.0)
-
-    def test_creeps_silently_when_something_is_near(self):
-        bot, spawn, labels, speeds = self.run_opening(True)
-        if "opening: second" in labels:
-            self.assertTrue(speeds and max(speeds[5:] or speeds) <= 5.0, speeds[:20])
+            if k >= 5:
+                speeds.append(math.hypot(m.vx, m.vy))
+        self.assertEqual(bot.tactics.loot_note, "pickup")
+        self.assertGreater(max(speeds), 12.0)                 # boosts onto the early laser pickup
 
 
 if __name__ == "__main__":

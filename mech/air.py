@@ -199,10 +199,16 @@ class RoofEdge(AirPlay):
         h = world.roof_at(me.pos[0], me.pos[1])
         if h is None or not me.grounded:
             return None
+        min_pitch = getattr(me, "min_pitch", -0.7)
+        muzzle_h = getattr(me, "muzzle_h", 7.0)
         rid = world.roof_id[world.node(me.pos[0], me.pos[1])]
         cells = [c for c in roof_cells_near(world, me.pos[0], me.pos[1], radius, h - 1.2, h + 1.2) if c[4] == rid]
         peek = None
         for d, px, py, rh, _ in cells:
+            dh = math.hypot(target_center[0] - px, target_center[1] - py)
+            pitch = math.atan2(target_center[2] - (rh + muzzle_h), max(dh, 0.1))
+            if pitch < min_pitch + 0.03:
+                continue
             if world.line_clear(px, py, rh + me.eye_h, target_center[0], target_center[1], target_center[2]):
                 peek = (px, py)
                 break

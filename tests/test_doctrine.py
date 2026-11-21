@@ -177,13 +177,18 @@ class PlayActTests(unittest.TestCase):
         it = D.PLAYS[D.HARASS].act(sit(e, t=20.0), {"last_harass_hit": 18.5})
         self.assertEqual(it.fire, "none")
 
-    def test_break_runs_to_cover_facing_the_danger(self):
-        e = track(pos=(100, 0, 0))
-        it = D.PLAYS[D.BREAK].act(sit(e), {"hide": (-20.0, 10.0), "danger_yaw": 0.3})
-        self.assertEqual((it.goal, it.speed, it.fire, it.face), ((-20.0, 10.0), "boost", "none", 0.3))
+    def test_break_runs_to_cover_shooting_until_los_breaks(self):
+        e_vis = track(pos=(100, 0, 0), los=True)
+        it = D.PLAYS[D.BREAK].act(sit(e_vis), {"hide": (-20.0, 10.0), "danger_yaw": 0.3})
+        self.assertEqual((it.goal, it.speed, it.fire, it.face), ((-20.0, 10.0), "boost", "long", 0.3))
+        self.assertTrue(it.no_laser_start)
         self.assertTrue(it.evasive)
-        it = D.PLAYS[D.BREAK].act(sit(e, energy=10.0), {"hide": None})
-        self.assertEqual((it.spot, it.speed), ("retreat", "walk"))
+        # Once behind cover (los=False), hold fire so 5 s regeneration starts immediately
+        e_hid = track(pos=(100, 0, 0), los=False)
+        it_hid = D.PLAYS[D.BREAK].act(sit(e_hid), {"hide": (-20.0, 10.0), "danger_yaw": 0.3})
+        self.assertEqual((it_hid.goal, it_hid.speed, it_hid.fire, it_hid.face), ((-20.0, 10.0), "boost", "none", 0.3))
+        it2 = D.PLAYS[D.BREAK].act(sit(e_hid, energy=10.0), {"hide": None})
+        self.assertEqual((it2.spot, it2.speed), ("retreat", "walk"))
 
     def test_reposition_holds_fire(self):
         it = D.PLAYS[D.REPOSITION].act(sit(), {})

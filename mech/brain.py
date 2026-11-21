@@ -20,7 +20,7 @@ from .gunner import Gunner
 from .tactics import Tactics
 
 WORK_BUDGET_S = 0.009       # searches stop after this much of the decision has passed
-NAME = "Wilce"
+NAME = "Wilce-B"
 
 
 def log(*a):
@@ -61,11 +61,8 @@ class Bot:
         dec = self.tactics.decide(me, obs)
         # ---- background searches inside the budget
         end = t0 + WORK_BUDGET_S
-        zf = self.mover.zf
-        if zf is None or not zf.done:
-            self.mover.work(me, self.zone, min(end, time.perf_counter() + 0.005))
-        self.mover.work(me, self.zone, end - 0.0015)
-        self.cover.run(end - 0.0005)
+        self.mover.work(me, self.zone, end - 0.0012)
+        self.cover.run(end - 0.0004)
         for srch in (self.tactics.opening_search, self.tactics.second_search):
             if srch is not None and not srch.done and time.perf_counter() < end:
                 srch.run(end)
@@ -80,14 +77,21 @@ class Bot:
             else:
                 move, boost, jump, done = airp.step(me)
         elif dec.direct is not None:
-            dx, dy = dec.direct[0] - me.pos[0], dec.direct[1] - me.pos[1]
-            d = math.hypot(dx, dy)
-            move = [dx / d, dy / d] if d > 0.8 else [0.0, 0.0]
-            boost, jump = False, False
+            sdodge, surq = self.mover._dodge_shells(me, self.threats.projectiles)
+            if sdodge is not None:
+                move = [sdodge[0], sdodge[1]]
+                boost, jump = bool(surq and me.energy > 8.0), False
+            else:
+                dx, dy = dec.direct[0] - me.pos[0], dec.direct[1] - me.pos[1]
+                d = math.hypot(dx, dy)
+                move = [dx / d, dy / d] if d > 0.8 else [0.0, 0.0]
+                boost, jump = False, False
         else:
             move, boost, jump = self.mover.steer(me, self.zone, dec.speed, dec.evasive, dec.threat_yaw, dec.hold,
                                                  shells=self.threats.projectiles)
         move_yaw = math.atan2(move[1], move[0]) if math.hypot(move[0], move[1]) > 0.3 else None
+        if dec.face is None and dec.target is None:
+            dec.face = self.tactics.patrol_yaw(me, move_yaw)
         # ---- torso and triggers
         obstacles = [tr for tr in self.threats.tracks.values() if tr.in_obs and not tr.dead]
         for c in obs.get("crates") or []:

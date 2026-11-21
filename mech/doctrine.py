@@ -21,10 +21,10 @@ from .geom import angdiff, bearing
 ASSAULT, CORNER, HARASS, BREAK, REPOSITION = "assault", "corner", "harass", "break", "reposition"
 
 ASSAULT_RATIO = 1.5
-EVEN_RATIO = 0.8
+EVEN_RATIO = 0.72
 NEAR_OTHERS_M = 160.0
 HYST = 0.2
-CORNER_TAKE = 0.85      # from a corner we fight unless the calculation says we clearly lose
+CORNER_TAKE = 0.72      # from a corner we fight unless the calculation says we clearly lose
 
 
 # ---------------------------------------------------------------------------- weapon numbers
@@ -93,19 +93,11 @@ def weapon_dps(kind, stats, cubes, dist, target_dodging, target_still, energy=10
 
 # ---------------------------------------------------------------------------- the situation
 class Situation:
-    """Everything the doctrine needs about one moment, as plain numbers.
-
-    me_*: our hp, max hp, cubes, energy, armor, weapons {kind: stats}, position, yaw, airborne
-    enemy: the primary enemy (a threats.Track or any object with the same fields)
-    others: other hostile mechs that are close and active
-    corner: we have a hide spot and a peek spot near us against this enemy
-    unseen_hit: something we cannot see hit us in the last 2 s
-    long_sight: we have a line of fire to the enemy (or had one a moment ago)
-    """
+    """Everything the doctrine needs about one moment, as plain numbers."""
 
     def __init__(self, t, me_pos, me_yaw, me_hp, me_max_hp, me_weapons, enemy=None, others=(),
                  me_cubes=0, me_energy=100.0, me_armor=0.0, corner=False, unseen_hit=False,
-                 long_sight=True, cfg=None, airborne=False, healing=False, gun_ammo=None):
+                 long_sight=True, cfg=None, airborne=False, healing=False, gun_ammo=None, shorted=False):
         self.t = t
         self.me_pos = me_pos
         self.me_yaw = me_yaw
@@ -124,6 +116,7 @@ class Situation:
         self.airborne = airborne
         self.healing = healing
         self.gun_ammo = gun_ammo
+        self.shorted = shorted
 
 
 class FightCalc:
@@ -145,6 +138,8 @@ class FightCalc:
         cfg = sit.cfg
         ours = 0.0
         for kind, st in sit.me_weapons.items():
+            if kind == "laser" and sit.shorted:
+                continue
             ours += weapon_dps(kind, st, sit.me_cubes, self.dist, dodging and not self.unaware, still,
                                sit.me_energy, cfg)
         if self.rear:
@@ -156,7 +151,7 @@ class FightCalc:
         # what it lands on us: we keep moving and dodge beyond the reversal range
         theirs = self.their_dps(e, self.dist)
         if e.engaged_elsewhere(sit.t) if hasattr(e, "engaged_elsewhere") else False:
-            theirs *= 0.5
+            theirs *= 0.45
         if self.unaware:
             theirs *= 0.6
         self.their_dps_on_us = theirs
@@ -164,7 +159,9 @@ class FightCalc:
         for o in sit.others:
             po = o.est_pos(sit.t) if hasattr(o, "est_pos") else o.pos
             d = math.hypot(po[0] - sit.me_pos[0], po[1] - sit.me_pos[1])
-            f = 1.0 if getattr(o, "sees_us", True) else 0.5
+            busy = (o.engaged_elsewhere(sit.t) if hasattr(o, "engaged_elsewhere") else False) \
+                and sit.t - getattr(o, "t_hit_us", -1e9) > 2.5
+            f = 0.2 if busy else (1.0 if getattr(o, "sees_us", True) else 0.5)
             extra += self.their_dps(o, d) * f
         self.others_dps = extra
         incoming = theirs + extra
@@ -183,7 +180,7 @@ class FightCalc:
         g = sit.me_weapons.get("gun")
         if g:
             burst += float(g.get("damage", 45.0)) * cube_mult(sit.me_cubes, cfg) * float(g.get("mag", 12.0)) * 0.9
-        if "laser" in sit.me_weapons:
+        if "laser" in sit.me_weapons and not sit.shorted:
             burst += float(sit.me_weapons["laser"].get("damage", 315.0)) * cube_mult(sit.me_cubes, cfg)
         if "lightning" in sit.me_weapons and self.dist <= float(sit.me_weapons["lightning"].get("range", 45.0)):
             burst += 60.0 * 10 * cube_mult(sit.me_cubes, cfg)
@@ -239,6 +236,7 @@ class Intent:
         self.reload_ok = False      # a good moment to reload
         self.hold = False           # stand still
         self.cover_near = True      # a hidden cell one step away (long bursts at range need it)
+        self.no_laser_start = False # keep full 1.0x walk/boost speed during fighting retreats
         self.label = play
 
 
@@ -248,8 +246,8 @@ def rear_point(enemy_pos, enemy_yaw, dist):
 
 
 class Assault:
-    """Close under cover to 45 m with lightning (else about 70 m), arrive on the rear arc when the
-    approach allows, and fire long bursts."""
+    """Close under cover to 45 m with lightning (else 60-85 m), arrive on the rear arc when the
+    approach allows, keep outside enemy lightning range if we lack lightning, and fire long bursts."""
     name = ASSAULT
 
     def act(self, sit, ctx):
@@ -258,12 +256,15 @@ class Assault:
         p = e.est_pos(sit.t) if hasattr(e, "est_pos") else e.pos
         calc = ctx.get("calc") if ctx else None
         dist = math.hypot(p[0] - sit.me_pos[0], p[1] - sit.me_pos[1])
-        want = 38.0 if "lightning" in sit.me_weapons else 65.0
+        want = 38.0 if "lightning" in sit.me_weapons else 62.0
         if "laser" in sit.me_weapons and "lightning" not in sit.me_weapons:
-            want = 90.0
+            want = 85.0
         if getattr(e, "has", lambda k: False)("mortar"):
             # its blast throws us back and drains the energy lightning needs: stay at gun/laser range
             want = max(want, 75.0)
+        if getattr(e, "has", lambda k: False)("lightning") and "lightning" not in sit.me_weapons:
+            # never walk into a 240-DPS lightning cone when we outrange it with gun/laser
+            want = max(want, 58.0)
         if dist > want:
             # approach: toward the rear side when it is not looking at us
             if not getattr(e, "sees_us", True):
@@ -271,11 +272,19 @@ class Assault:
             else:
                 it.goal = (p[0], p[1])
             it.spot = "approach"
-            it.speed = "boost" if dist > want + 30 and sit.me_energy > 40 else "walk"
+            it.speed = "boost" if dist > want + 25 and sit.me_energy > 35 else "walk"
+        elif dist < 49.0 and getattr(e, "has", lambda k: False)("lightning") and "lightning" not in sit.me_weapons:
+            # kite back outside 45 m while firing full bursts
+            dx, dy = sit.me_pos[0] - p[0], sit.me_pos[1] - p[1]
+            d = math.hypot(dx, dy) or 1.0
+            it.goal = (sit.me_pos[0] + dx / d * 24.0, sit.me_pos[1] + dy / d * 24.0)
+            it.spot = "retreat"
+            it.speed = "boost" if sit.me_energy > 20 else "walk"
+            it.no_laser_start = True
         else:
             it.goal = None
             it.spot = "strafe"
-        it.evasive = dist > 70.0 or getattr(e, "has", lambda k: True)("gun")
+        it.evasive = dist > 60.0 or getattr(e, "has", lambda k: True)("gun")
         it.fire = "long"
         it.reload_ok = sit.gun_ammo is not None and sit.gun_ammo == 0
         if calc is not None and calc.finishable:
@@ -284,7 +293,8 @@ class Assault:
 
 
 class CornerFight:
-    """Step out from a wall corner, fire, step back. Reload behind the wall."""
+    """Step out from a wall corner, fire, step back. Reload behind the wall. If no corner is ready
+    yet (e.g. t = 0), fire full bursts immediately while strafing toward cover."""
     name = CORNER
 
     def act(self, sit, ctx):
@@ -307,9 +317,9 @@ class CornerFight:
             it.spot = "peek"
             it.fire = "long"
         if it.goal is None:
-            # no corner known: fall back to strafing in place behind whatever we have
+            # no corner ready yet: fire full bursts while strafing rather than throttling or waiting
             it.spot = "strafe"
-            it.fire = "short"
+            it.fire = "long" if weapon_ready else "none"
             it.evasive = True
         it.speed = "walk"
         return it
@@ -333,27 +343,34 @@ class Harass:
 
 
 class BreakToCover:
-    """Boost to the nearest cell hidden from every known threat, changing direction irregularly,
-    torso toward the most dangerous attacker. No shooting: healing needs 5 s without damage."""
+    """Fighting retreat: boost/jink to the nearest cell hidden from known threats with torso locked
+    on the attacker, keeping gun/lightning firing at full movement speed until LOS is broken."""
     name = BREAK
 
     def act(self, sit, ctx):
-        it = Intent(BREAK, sit.enemy)
+        e = sit.enemy
+        it = Intent(BREAK, e)
         hide = ctx.get("hide") if ctx else None
         it.goal = hide
         it.spot = "hide" if hide is not None else "retreat"
         it.speed = "boost" if sit.me_energy > 20 else "walk"
         it.evasive = True
-        it.fire = "none"
-        it.reload_ok = True
+        has_los = bool(e is not None and getattr(e, "los", False)) or bool(ctx and ctx.get("shootable", False))
+        if has_los:
+            it.fire = "long"
+            it.no_laser_start = True
+            it.reload_ok = sit.gun_ammo is not None and sit.gun_ammo == 0
+            it.label = "break: fighting"
+        else:
+            it.fire = "none"
+            it.reload_ok = True
         danger = ctx.get("danger_yaw") if ctx else None
         it.face = danger
-        # a laser that is already charged can still be released on the way (handled by the gunner)
         return it
 
 
 class Reposition:
-    """No threat: the tactics layer chooses where to go (cover, loot, the next circle)."""
+    """No threat: the tactics layer chooses where to go (cover, loot, crates, the next circle)."""
     name = REPOSITION
 
     def act(self, sit, ctx):
@@ -381,39 +398,40 @@ def retreating(sit, enemy):
 
 
 def choose_play(sit, calc=None, prev=None):
-    """Pick one of the five plays for this decision. Returns (play name, FightCalc or None).
-    `prev` is last decision's play: thresholds move by HYST in its favour so that a ratio sitting
-    on a boundary does not flip the play every tick.
-
-    `calc.ratio` is the open-ground ratio (their time to kill us / our time to kill them);
-    `calc.ratio_corner` assumes we fight from a corner and are exposed half the time."""
+    """Pick one of the five plays for this decision. Returns (play name, FightCalc or None)."""
     e = sit.enemy
     if e is None:
         if sit.unseen_hit:
             return BREAK, None
         return REPOSITION, None
     calc = calc or FightCalc(sit, e)
-    near_others = [o for o in sit.others if _dist(sit, o) <= NEAR_OTHERS_M]
+    # Others that are busy fighting someone else (and not shooting us) are a third-party opening, not a 2v1 on us.
+    hostile_others = [
+        o for o in sit.others
+        if _dist(sit, o) <= NEAR_OTHERS_M
+        and not ((o.engaged_elsewhere(sit.t) if hasattr(o, "engaged_elsewhere") else False)
+                 and sit.t - getattr(o, "t_hit_us", -1e9) > 2.5)
+    ]
     hp_frac = sit.me_hp / max(sit.me_max_hp, 1.0)
     if calc.our_dps <= 1e-6:
         return BREAK, calc
     # hit from somewhere we cannot see, and nothing in front of us to answer
     if sit.unseen_hit and not getattr(e, "los", True):
         return BREAK, calc
-    if near_others:
-        # a third party changes everything: finish a dying target, else fight only from a corner
-        if calc.finishable and calc.ratio >= 1.0 and hp_frac > 0.3:
+    if hostile_others:
+        # finish a dying target fast; else isolate from a corner; else fighting retreat to cover
+        if calc.finishable and calc.ratio >= 0.75 and hp_frac > 0.28:
             return ASSAULT, calc
-        if calc.ratio_corner >= 1.0 and sit.corner:
+        if calc.ratio_corner >= 0.85 and sit.corner:
             return CORNER, calc
         return BREAK, calc
     if hp_frac < 0.3 and not calc.finishable:
         return BREAK, calc
     a_thr = ASSAULT_RATIO - (HYST if prev == ASSAULT else 0.0) + (HYST if prev == CORNER else 0.0)
     e_thr = EVEN_RATIO - (HYST if prev in (CORNER, ASSAULT) else 0.0) + (HYST if prev == BREAK else 0.0)
-    if calc.ratio >= a_thr or (calc.finishable and calc.ratio >= 1.0):
+    if calc.ratio >= a_thr or (calc.finishable and calc.ratio >= 0.85):
         return ASSAULT, calc
-    # from cover, a roughly even fight is taken: hunters come anyway, and running shows them our back
+    # from cover (or open ground at >= 0.72), fight rather than showing our back
     if calc.ratio >= e_thr or (sit.corner and calc.ratio_corner >= CORNER_TAKE + (HYST if prev == BREAK else 0.0)):
         return CORNER, calc
     if retreating(sit, e) and sit.long_sight and calc.dist <= 230.0:
@@ -427,8 +445,7 @@ def _dist(sit, o):
 
 
 def pick_target(sit_factory, enemies, t, me_pos):
-    """Choose the primary enemy: weak, close, already engaged elsewhere, attacking us. Returns the
-    track with the best (ratio-weighted) score, or None."""
+    """Choose the primary enemy: weak, close, already engaged elsewhere, attacking us."""
     best = None
     for e in enemies:
         sit = sit_factory(e)
@@ -438,11 +455,11 @@ def pick_target(sit_factory, enemies, t, me_pos):
         if not visible:
             score *= 0.35            # a memory or a sound: anything we can actually shoot comes first
         if e.engaged_elsewhere(t) if hasattr(e, "engaged_elsewhere") else False:
-            score *= 1.3
+            score *= 1.55
         if getattr(e, "t_hit_us", -1e9) >= t - 2.0:
             score *= 2.0             # whoever is hitting us now
         if calc.finishable and visible:
-            score *= 1.6
+            score *= 2.1
         score /= 1.0 + calc.dist / 250.0
         if best is None or score > best[0]:
             best = (score, e, calc)

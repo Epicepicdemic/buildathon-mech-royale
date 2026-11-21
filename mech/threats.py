@@ -79,20 +79,49 @@ class Track:
         return kind in self.weapons
 
     def dodging(self):
-        """Has it changed direction sharply in the last ~2 s (as a dodging mech does)?"""
+        """Has it changed direction sharply or woven smoothly in the last ~2 s?"""
         h = self.hist
         if len(h) < 4:
             return False
-        flips = 0
-        hh = [e for e in h if e[0] >= h[-1][0] - 2.0]
+        t_cut = h[-1][0] - 2.0
+        hh = [e for e in h if e[0] >= t_cut]
         for a, b in zip(hh, hh[1:]):
             sa = math.hypot(a[3], a[4])
             sb = math.hypot(b[3], b[4])
-            if sa > 3 and sb > 3:
-                c = (a[3] * b[3] + a[4] * b[4]) / (sa * sb)
-                if c < 0.3:
-                    flips += 1
-        return flips >= 1
+            if sa > 3.0 and sb > 3.0:
+                if (a[3] * b[3] + a[4] * b[4]) / (sa * sb) < 0.3:
+                    return True
+        # Smooth sinusoidal weave (e.g. period 1.2-2.0 s): adjacent 0.1 s ticks barely turn,
+        # but velocity 0.35-0.75 s apart rotates by > 47 degrees (cos < 0.68).
+        n = len(hh)
+        for i in range(n):
+            ti, vxi, vyi = hh[i][0], hh[i][3], hh[i][4]
+            si = math.hypot(vxi, vyi)
+            if si <= 3.0:
+                continue
+            for j in range(i + 3, n):
+                dt = hh[j][0] - ti
+                if dt < 0.32:
+                    continue
+                if dt > 0.80:
+                    break
+                vxj, vyj = hh[j][3], hh[j][4]
+                sj = math.hypot(vxj, vyj)
+                if sj > 3.0 and (vxi * vxj + vyi * vyj) / (si * sj) < 0.68:
+                    return True
+        return False
+
+    def mean_vel(self, window=0.75):
+        """Mean horizontal velocity over `window` s; damps lead overshoot against weavers."""
+        h = self.hist
+        if len(h) < 3:
+            return tuple(self.vel)
+        t_cut = h[-1][0] - window
+        sub = [e for e in h if e[0] >= t_cut]
+        if len(sub) < 2:
+            return tuple(self.vel)
+        inv = 1.0 / len(sub)
+        return (sum(e[3] for e in sub) * inv, sum(e[4] for e in sub) * inv, self.vel[2])
 
     def still(self):
         return math.hypot(self.vel[0], self.vel[1]) < 1.5
@@ -139,6 +168,7 @@ class Threats:
         self.last_kill_t = -1e9
         self.projectiles = []
         self.last_damage = None       # (t, bearing, by, weapon)
+        self.last_rear_hit = None     # (t, bearing, by, weapon)
         self.dmg_taken = []           # (t, amount, weapon)
         self.t_dealt = -1e9           # we last dealt damage
         self.t_taken = -1e9           # we last took (non-zone) damage
@@ -146,6 +176,8 @@ class Threats:
         self.mortar_heard = None      # (t, bearing, band) of the latest mortar launch heard
         self.prev_in_obs = set()
         self.t_fight = -1e9           # we last dealt or took weapon damage
+        self.short_until = -1e9       # lightning short effect: laser disabled until this t
+        self.recent_kill_drops = []   # (pos, est_cubes, weapons, t) emitted this tick
 
     # ------------------------------------------------------------------ helpers
     def band_dist(self, kind, band):
@@ -173,8 +205,10 @@ class Threats:
     def update(self, obs, me):
         t = me.t
         self.t = t
+        self.recent_kill_drops = []
         mx, my = me.pos[0], me.pos[1]
         eye = me.eye
+        muzzle = me.muzzle
         seen_ids = set()
         for m in obs.get("mechs") or []:
             tid = m.get("id")
@@ -218,37 +252,48 @@ class Threats:
                 tr.los = False
                 tr.sees_us = False
                 tr.charging = False if t - tr.t_seen > 1.0 else tr.charging
-        # sight estimates for the ones in the observation (memory entries may be out of view)
+        # Shot line vs optical sight for entries in obs (trees block sight >45 m, NEVER shots!)
         if self.w is not None:
             for tid in seen_ids:
                 tr = self.tracks[tid]
                 d = math.hypot(tr.pos[0] - mx, tr.pos[1] - my)
-                if d > 260:
+                if d > 285:
                     tr.los = False
                     tr.sees_us = False
                     continue
-                h = 9.0 if tr.kind == "mech" else 3.5
-                tr.los = self.w.sees(eye, tr.pos, h, self.near_range)
-                if tr.los:
-                    # does it see us? (its eye, its facing)
-                    in_wedge = angdiff(tr.yaw, math.atan2(my - tr.pos[1], mx - tr.pos[0])) <= self.fov / 2 + 0.05
-                    tr.sees_us = d <= self.near_range or (in_wedge and d <= self.vis_range)
-                else:
-                    tr.sees_us = False
+                s = 1.0 + 0.05 * (tr.cubes or 0) if tr.kind == "mech" else 1.0
+                h = 9.0 * s if tr.kind == "mech" else 3.5
+                c_pt = (tr.pos[0], tr.pos[1], tr.pos[2] + h * 0.5)
+                top_pt = (tr.pos[0], tr.pos[1], tr.pos[2] + h * 0.82)
+                tr.los = self.w.shot_clear(muzzle, c_pt) or self.w.shot_clear(muzzle, top_pt)
+                their_eye = (tr.pos[0], tr.pos[1], tr.pos[2] + (8.0 * s if tr.kind == "mech" else 2.5))
+                opt_sees = self.w.sees(their_eye, me.pos, me.height, self.near_range)
+                in_wedge = angdiff(tr.yaw, math.atan2(my - tr.pos[1], mx - tr.pos[0])) <= self.fov / 2 + 0.08
+                tr.sees_us = opt_sees and (d <= self.near_range or (in_wedge and d <= self.vis_range * 1.15))
         self._events(obs, me)
+        # Anyone who just hit us has a line on us even if beyond nominal 200 m (e.g. sensors upgrade)
+        for tr in self.tracks.values():
+            if not tr.dead and t - tr.t_hit_us <= 1.2:
+                tr.sees_us = True
         self._beams(obs, me)
         self._sounds(obs, me)
         self.projectiles = [p for p in (obs.get("projectiles") or [])]
         alive = obs.get("alive")
         if alive is not None:
             if self.alive is not None and alive < self.alive:
-                for _ in range(self.alive - alive):
+                n_died = self.alive - alive
+                for _ in range(n_died):
                     self.deaths.append((t, "alive"))
-                # a nearly dead mech that vanished from view on the tick someone died is that someone
+                # a wounded mech that vanished from view on the tick someone died is that someone
                 gone = [tr for tr in self.tracks.values() if tr.kind == "mech" and not tr.dead and not tr.in_obs
-                        and tr.id in self.prev_in_obs and (tr.hp_frac() < 0.35)]
-                for tr in gone[: self.alive - alive]:
+                        and tr.id in self.prev_in_obs and (tr.hp_frac() < 0.45 or t - tr.t_we_hit <= 2.5)]
+                gone.sort(key=lambda tr: tr.hp_frac())
+                for tr in gone[:n_died]:
                     tr.dead = True
+                    if not tr.phantom:
+                        self.recent_kill_drops.append(
+                            (list(tr.est_pos(t)), (tr.cubes or 0) + 2, [w for w in tr.weapons if w != "gun"], t)
+                        )
             self.alive = alive
         self.prev_in_obs = set(seen_ids)
         # forget stale phantoms and old contacts
@@ -277,6 +322,8 @@ class Threats:
                 self.dmg_taken.append((t, amt, wpn))
                 b = e.get("bearing")
                 self.last_damage = (t, b, by, wpn)
+                if b is not None and angdiff(me.yaw, b) > math.pi * 0.5:
+                    self.last_rear_hit = (t, b, by, wpn)
                 tr = self.tracks.get(by)
                 if tr is None:
                     kind = "npc" if (wpn == "npc" or (isinstance(by, (int, float)) and by >= 100)) else "mech"
@@ -284,9 +331,13 @@ class Threats:
                     tr.phantom = True
                     self.tracks[by] = tr
                     if b is not None:
-                        guess = {"lightning": 35.0, "npc": 40.0, "gun": 110.0, "laser": 150.0, "mortar": 140.0}.get(wpn, 100.0)
+                        guess = {"lightning": 35.0, "npc": 40.0, "gun": 110.0, "laser": 165.0, "mortar": 140.0}.get(wpn, 100.0)
                         tr.pos = [me.pos[0] + math.cos(b) * guess, me.pos[1] + math.sin(b) * guess, me.pos[2]]
                         tr.t_seen = t - 0.5
+                elif tr.phantom and b is not None:
+                    guess = {"lightning": 35.0, "npc": 40.0, "gun": 110.0, "laser": 165.0, "mortar": 140.0}.get(wpn, 100.0)
+                    tr.pos = [me.pos[0] + math.cos(b) * guess, me.pos[1] + math.sin(b) * guess, me.pos[2]]
+                    tr.t_seen = t - 0.3
                 if wpn in ("gun", "laser", "lightning", "mortar") and wpn not in tr.weapons:
                     tr.weapons.append(wpn)
                 tr.t_hit_us = t
@@ -310,9 +361,19 @@ class Threats:
                 tr = self.tracks.get(e.get("target"))
                 if tr is not None:
                     tr.dead = True
+                    if tr.kind == "mech" and not tr.phantom:
+                        self.recent_kill_drops.append(
+                            (list(tr.est_pos(t)), (tr.cubes or 0) + 2, [w for w in tr.weapons if w != "gun"], t)
+                        )
                 self.kills += 1
                 self.last_kill_t = t
                 self.deaths.append((t, "kill"))
+            elif et == "effect" and e.get("effect") == "short":
+                lw = ((self.cfg.get("weapons") or {}).get("lightning") or {})
+                self.short_until = t + float(lw.get("short_s", 2.0))
+                tr = self.tracks.get(e.get("by"))
+                if tr is not None and "lightning" not in tr.weapons:
+                    tr.weapons.append("lightning")
         if len(self.dmg_taken) > 80:
             del self.dmg_taken[:-80]
 
