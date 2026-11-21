@@ -41,7 +41,14 @@ class Bot:
         self.mover = Mover(self.world, self.cfg, self.seed)
         self.cover = CoverState(self.world, random.Random(self.seed ^ 0xC0E5))
         self.gunner = Gunner(self.cfg, self.world, self.seed)
-        self.tactics = Tactics(self.world, self.cfg, self.mover, self.cover, self.threats, self.zone, self.seed)
+        self.airmap = None
+        try:
+            from .airmap import AirMap      # needs NumPy; without it the bot uses mech/air.py alone
+            self.airmap = AirMap()
+        except Exception as exc:            # noqa: BLE001 - a missing table must not stop the bot
+            log("air tables not loaded:", exc)
+        self.tactics = Tactics(self.world, self.cfg, self.mover, self.cover, self.threats, self.zone, self.seed,
+                               airmap=self.airmap)
         self.decisions = 0
         self.prev_charge = 0.0
         self.worst_ms = 0.0

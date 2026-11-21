@@ -48,8 +48,9 @@ class Decision:
 
 
 class Tactics:
-    def __init__(self, world, cfg, mover, cover, threats, zone, seed=0):
+    def __init__(self, world, cfg, mover, cover, threats, zone, seed=0, airmap=None):
         self.w = world
+        self.airmap = airmap
         self.cfg = cfg
         self.mv = mover
         self.cov = cover
@@ -881,6 +882,14 @@ class Tactics:
         final_roof = None
         if z.next_radius <= 25.0:
             final_roof = A.LastCircleRoof.find(w, me, z.next_center, max(z.next_radius, 6.0), mech_cfg)
+            if final_roof is not None and self.airmap is not None:
+                # only when the tables say the roof outlasts the best ground in the closing circle
+                try:
+                    lc = self.airmap.last_circle(z.next_center[0], z.next_center[1], max(z.next_radius, 6.0))
+                    if lc.get("roof_advantage_s", 0.0) < 3.0:
+                        final_roof = None
+                except Exception:    # noqa: BLE001
+                    pass
         # a manoeuvre in progress keeps the legs until it is done
         if self.air is not None:
             if self.air.done:
@@ -948,10 +957,12 @@ class Tactics:
                     return True
             if any(e.sees_us for e in enemies):
                 leave = True            # seen up here: a roof is a short stop, not a home
-            if not leave and (me.hp_frac < 0.93 or target is not None):
-                # heal up here, out of reach of ground bots
+            if not leave and target is None and me.hp_frac < 0.93 and not self.th.threat_points(me, 10.0):
+                # heal up here only while nothing is known nearby: a roof is partial cover, not
+                # concealment (air report: from the ground the top of the mech shows over the edge
+                # unless it stands a long way back)
                 dec.hold = True
-                intent.fire = "none" if target is None else intent.fire
+                intent.fire = "none"
                 intent.label = "roof: heal"
                 self.mv.clear()
                 return True
@@ -990,7 +1001,8 @@ class Tactics:
             hide = self.cov.hide_xy()
             far_hide = hide is None or math.hypot(hide[0] - me.pos[0], hide[1] - me.pos[1]) > 25.0
             if d < 60.0 and far_hide and slack > 30.0 and me.hp_frac >= 0.4:
-                hop = A.WallHop.find(w, me, away_from=(tp[0], tp[1]), cfg_mech=mech_cfg)
+                hop = self._table_wall_hop(me, tp) if self.airmap is not None else \
+                    A.WallHop.find(w, me, away_from=(tp[0], tp[1]), cfg_mech=mech_cfg)
                 if hop is not None:
                     # only onto a spot none of the watchers can see (height of the roof, not the ground)
                     for wx, wy, wz in self.watchers(me):
@@ -1004,6 +1016,26 @@ class Tactics:
                     self.air_ban_until = t + 10.0
                     return True
         return False
+
+    def _table_wall_hop(self, me, pursuer):
+        """The air tables' wall hop (analysis/mech/air): the nearest reachable roof spot that breaks
+        the pursuer's sight, launched from within a few metres of here, as (x, y, roof z, launch)."""
+        try:
+            h = self.airmap.wall_hop(me.pos[0], me.pos[1], pursuer_pos=(pursuer[0], pursuer[1]),
+                                     max_energy=me.energy - 6.0)
+        except Exception:            # noqa: BLE001
+            return None
+        if h is None or not h.get("breaks_los"):
+            return None
+        lx, ly = h["launch_xy"]
+        if math.hypot(lx - me.pos[0], ly - me.pos[1]) > 10.0:
+            return None
+        rx, ry, rz = h["roof_cover_pos"]
+        # roofs of 7-18 m are the useful ones (air report): higher costs time in the air and from
+        # 30 m nothing near the wall can be aimed at; and the hidden spot must be close to the edge
+        if rz - me.pos[2] > 18.5 or math.hypot(rx - lx, ry - ly) > 25.0:
+            return None
+        return (rx, ry, rz, (lx, ly))
 
     def _air_safe(self, me, enemies):
         """Nothing that can see us, or hit us in the last 2 s, is within AIR_SAFE_M."""

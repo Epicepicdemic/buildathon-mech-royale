@@ -136,3 +136,48 @@ class RoofPlayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AirTableTests(unittest.TestCase):
+    """The precomputed roof and jet tables (mech/airmap, from analysis/mech/air)."""
+
+    def test_tables_load_in_the_bot(self):
+        from tests.test_controller import hello
+        from mech.brain import Bot
+        bot = Bot(hello(), world=world())
+        self.assertIsNotNone(bot.airmap)
+        self.assertIs(bot.tactics.airmap, bot.airmap)
+
+    def test_table_wall_hop_breaks_sight_and_launches_nearby(self):
+        from tests.test_controller import hello
+        from mech.brain import Bot
+        from mech.state import Me
+        from tests.helpers import self_obs
+        w = world()
+        bot = Bot(hello(), world=w)
+        found = 0
+        for (x, y), pursuer in (((49.0, -52.0), (34.7, -89.4)), ((183.0, 144.0), (213.8, 118.5)),
+                                ((153.0, 178.0), (116.3, 162.0)), ((449.0, 260.0), (488.3, 252.6))):
+            me = Me(self_obs(pos=(x, y, w.floor(x, y)), t=100.0), bot.cfg)
+            hop = bot.tactics._table_wall_hop(me, pursuer)
+            if hop is None:
+                continue
+            found += 1
+            rx, ry, rz, (lx, ly) = hop
+            self.assertLessEqual(math.hypot(lx - x, ly - y), 10.0)
+            self.assertLessEqual(rz - me.pos[2], 18.5)
+            # the roof spot is out of the pursuer's sight
+            self.assertFalse(w.sees((pursuer[0], pursuer[1], w.floor(*pursuer) + 8.0), (rx, ry, rz), 9.0))
+        self.assertGreaterEqual(found, 2)
+
+    def test_wall_hop_walks_to_the_launch_first(self):
+        from mech import air as A
+        from mech.state import Me
+        from tests.helpers import self_obs, config
+        w = world()
+        me = Me(self_obs(pos=(20.0, -85.0, w.floor(20.0, -85.0)), t=10.0), config())
+        hop = A.WallHop()
+        hop.start(10.0, (11.9, -89.8, 11.9, (26.0, -85.0)))
+        move, boost, jump, done = hop.step(me)
+        self.assertFalse(jump)
+        self.assertGreater(move[0], 0.9)       # toward the launch cell first, not the roof

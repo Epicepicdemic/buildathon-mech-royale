@@ -116,7 +116,8 @@ class WallHop(AirPlay):
         return best[1] if best else None
 
     def step(self, me):
-        tx, ty, h = self.target
+        tx, ty, h = self.target[0], self.target[1], self.target[2]
+        launch = self.target[3] if len(self.target) > 3 else None
         dx, dy = tx - me.pos[0], ty - me.pos[1]
         d = math.hypot(dx, dy)
         mv = unit(dx, dy)
@@ -124,6 +125,11 @@ class WallHop(AirPlay):
             self.done = True
             return [0.0, 0.0], False, False, True
         feet_clear = me.pos[2] >= h + 0.6
+        if self.phase == "go" and launch is not None and me.grounded and \
+                math.hypot(launch[0] - me.pos[0], launch[1] - me.pos[1]) > 2.0:
+            # the air tables give the launch cell: walk there first, jump from it
+            lv = unit(launch[0] - me.pos[0], launch[1] - me.pos[1])
+            return [lv[0], lv[1]], False, False, False
         if self.phase == "go":
             # walk to the wall foot, then jump
             if me.grounded and me.pos[2] < h - 1.0:
