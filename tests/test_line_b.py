@@ -272,6 +272,27 @@ class RearWatchAndMidgameTests(unittest.TestCase):
         frac = math.hypot(hx - circle[0], hy - circle[1]) / circle[2]
         self.assertGreater(frac, 0.25, frac)    # does not camp the exposed dead-center bowl in 7-bot midgame
 
+    def test_outside_current_circle_runs_in_on_phase_transition(self):
+        """Even right after a phase transition when next shrink_end is 50 s away (slack > 35 s),
+        being outside the current circle triggers an immediate boosted run into the circle."""
+        w = world()
+        bot = Bot(hello(), world=w)
+        me = (300.0, -60.0)
+        obs = self_obs(pos=(me[0], me[1], w.floor(*me)), t=325.1)
+        obs["self"]["in_zone"] = False
+        obs["zone"] = {
+            "center": [200.0, -60.0],
+            "radius": 70.0,
+            "next_center": [190.0, -60.0],
+            "next_radius": 25.0,
+            "shrink_start": 350.0,
+            "shrink_end": 375.0,
+            "dps": 160.0,
+        }
+        a = bot.act(obs)
+        self.assertLess(a["move"][0], -0.4, a["move"])  # running west into circle at x=200!
+        self.assertTrue(a["boost"])
+
 
 if __name__ == "__main__":
     unittest.main()

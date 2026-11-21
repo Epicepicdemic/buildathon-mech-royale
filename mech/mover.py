@@ -124,11 +124,9 @@ class Mover:
             math.hypot(goal[0] - self.plan_goal[0], goal[1] - self.plan_goal[1]) <= replan_dist and tag == self.plan_tag
         if same or pending:
             return
-        start = self.w.nearest_free(me.pos[0], me.pos[1], 6)
-        gn = self.w.nearest_free(goal[0], goal[1], 8)
+        start = self.w.nearest_main(me.pos[0], me.pos[1], 6)
+        gn = self.w.nearest_main(goal[0], goal[1], 24)
         if start is None or gn is None:
-            return
-        if not self.w.main[gn]:
             return
         self.plan_goal = goal
         self.plan_tag = tag
@@ -187,25 +185,42 @@ class Mover:
         urgent = (not me.in_zone) or (margin_now < bspeed * 3.0 + 6.0 and zone.margin_next(x, y) < 0 and t >= zone.shrink_start - 3)
         if not urgent and zone.margin_next(x, y) < 0:
             urgent = self.slack(me, zone) < 3.0
-        if urgent and self.field_ready():
+        if urgent:
             self.urgent = True
-            path = self.zf.path(w.nearest_free(x, y, 4) or n, 40)
+            active_zf = None
+            if margin_now < 0 and self.zf_prev is not None and self.zf_prev.done:
+                active_zf = self.zf_prev
+            elif self.field_ready():
+                active_zf = self.zf
+            elif self.zf_prev is not None and self.zf_prev.done:
+                active_zf = self.zf_prev
+            path = active_zf.path(w.nearest_free(x, y, 4) or n, 40) if active_zf is not None else []
             if len(path) > 1:
                 pts = nav.path_points(w, path)
                 fol = routing.Follower(w, pts)
                 tx, ty, rem, off = fol.target(x, y)
                 move = unit(tx - x, ty - y)
-                bdodge = self._dodge_bullets(me, shells, move, forward_weight=0.75)
-                if bdodge is not None:
-                    move = bdodge
-                sdodge, _ = self._dodge_shells(me, shells)
-                if sdodge is not None:
-                    move = unit(move[0] * 0.45 + sdodge[0] * 0.85, move[1] * 0.45 + sdodge[1] * 0.85)
-                boost = self.booster.want(True, me.energy)
-                st = self.stuck.update(t, x, y, True)
-                jump, boost = self._unstick(st, me, jump, boost)
-                self.note = "zone run"
-                return [move[0], move[1]], boost, jump
+            else:
+                tc = zone.center if margin_now < 0 else zone.next_center
+                byaw = math.atan2(tc[1] - y, tc[0] - x)
+                for deg in (0, 35, -35, 70, -70, 110, -110):
+                    ux, uy = math.cos(byaw + math.radians(deg)), math.sin(byaw + math.radians(deg))
+                    if w.walkable(x, y, x + ux * 4.5, y + uy * 4.5, need=2.5, skip_start=1.5):
+                        move = (ux, uy)
+                        break
+                else:
+                    move = unit(tc[0] - x, tc[1] - y)
+            bdodge = self._dodge_bullets(me, shells, move, forward_weight=0.75)
+            if bdodge is not None:
+                move = bdodge
+            sdodge, _ = self._dodge_shells(me, shells)
+            if sdodge is not None:
+                move = unit(move[0] * 0.45 + sdodge[0] * 0.85, move[1] * 0.45 + sdodge[1] * 0.85)
+            boost = self.booster.want(True, me.energy)
+            st = self.stuck.update(t, x, y, True)
+            jump, boost = self._unstick(st, me, jump, boost)
+            self.note = "zone run"
+            return [move[0], move[1]], boost, jump
         # 3. follow the route (or step toward a pending goal while the planner finishes)
         commanded = False
         if self.fol is not None and not hold:

@@ -133,6 +133,28 @@ class World:
                 return best[1]
         return best[1] if best else None
 
+    def nearest_main(self, x, y, max_r=24):
+        """The nearest walkable node on the main ground network (excludes isolated roofs/islands)."""
+        n = self.node(x, y)
+        if self.edges[n] and self.main[n]:
+            return n
+        v0, u0 = divmod(n, self.nu)
+        best = None
+        for r in range(1, max_r + 1):
+            for dv in range(-r, r + 1):
+                for du in (range(-r, r + 1) if abs(dv) == r else (-r, r)):
+                    u, v = u0 + du, v0 + dv
+                    if 0 <= u < self.nu and 0 <= v < self.nv:
+                        m = v * self.nu + u
+                        if self.edges[m] and self.main[m]:
+                            px, py = self.node_xy(m)
+                            d = math.hypot(px - x, py - y)
+                            if best is None or d < best[0]:
+                                best = (d, m)
+            if best is not None and best[0] <= r * self.res:
+                return best[1]
+        return best[1] if best else None
+
     def exposure(self, n):
         return self.expo[n] / 255.0
 

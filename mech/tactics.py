@@ -218,8 +218,8 @@ class Tactics:
         drones = [tr.home for tr in self.th.npcs() if tr.home is not None]
         n = P.choose_hold(self.w, me.xy, (cx, cy, max(2.0, rs - 4.0)), threats, self.rng,
                           drones=drones, alive=self.th.alive)
-        if n is None:
-            n = self.w.nearest_free(cx, cy, 30)
+        if n is None or not self.w.main[n]:
+            n = self.w.nearest_main(cx, cy, 32)
         self.hold_goal = self.w.node_xy(n) if n is not None else (cx, cy)
         self.hold_key = key
         self.hold_t = me.t
@@ -576,11 +576,14 @@ class Tactics:
         if t < self.mortar_jink_until:
             dec.evasive = True
 
-        # Zone safety override when slack runs tight
+        # Zone safety override when outside current circle or when slack runs tight
         cx, cy, rs = self.mv.safe_circle(z)
-        if slack < 15.0 and math.hypot(me.pos[0] - cx, me.pos[1] - cy) > rs:
-            self.mv.go(self.hold_spot(me), me, z, prefer_cover=slack > 8.0, tag="zone", replan_dist=8.0)
+        out_now = (not me.in_zone) or z.margin_at(me.pos[0], me.pos[1], t) < 2.0
+        if out_now or (slack < 15.0 and math.hypot(me.pos[0] - cx, me.pos[1] - cy) > rs):
+            self.mv.go(self.hold_spot(me), me, z, prefer_cover=(not out_now and slack > 8.0), tag="zone", replan_dist=8.0)
             dec.hold = False
+            if out_now and me.energy > 15.0:
+                dec.speed = "boost"
             if intent.fire == "long" and (dec.target is None or self._dist_pt(me, dec.target.pos) > 90.0):
                 intent.fire = "short"
             intent.label = (intent.label or "") + " >zone"
@@ -846,24 +849,31 @@ class Tactics:
                     intent.spot = "peek"
                 return True
 
-        # 1. Last circle closing on a building: climb onto that roof ONLY when not under fire / watched closely
-        under_fire = any(e.sees_us or e.los or self._dist(me, e) < 65.0 for e in enemies) or (t - self.th.t_taken <= 3.0)
+        # 1. Last circle closing on a building: climb onto that roof unless under direct LOS fire with room to spare
+        direct_los_fire = any(e.los for e in enemies) and z.radius > 35.0
         if final_roof is not None and t >= self.air_ban_until:
             fx, fy, fh = final_roof
             if on_roof and abs(me.pos[2] - fh) < 1.5:
                 self.roof_mode = True
                 self.mv.allow_roof = True
-                if math.hypot(fx - me.pos[0], fy - me.pos[1]) > 2.0:
+                if math.hypot(fx - me.pos[0], fy - me.pos[1]) > 0.4:
                     dec.direct = (fx, fy)
                 intent.label = "last circle: roof"
                 return True
-            if not under_fire:
+            if not direct_los_fire:
                 hop = A.WallHop.find(w, me, max_climb=56.0, cfg_mech=mech_cfg, reach=14.0)
                 if hop is not None and abs(hop[2] - fh) < 1.5:
                     self.air = A.WallHop()
                     self.air.start(t, hop)
                     self.roof_mode = True
                     return True
+                if z.radius <= 40.0:
+                    self.mv.go((fx, fy), me, z, prefer_cover=False, tag="last-roof-wall", replan_dist=4.0)
+                    dec.hold = False
+                    if me.energy > 20.0:
+                        dec.speed = "boost"
+                    intent.label = "last circle: to roof"
+                    return False
 
         # 2. On a roof: fight from its edge (respecting -0.7 rad pitch), drop-attack with lightning, or step down
         if self.roof_mode and on_roof:
