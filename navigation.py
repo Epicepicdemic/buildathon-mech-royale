@@ -51,3 +51,27 @@ class Grid:
                 if nc<cost.get(q,float('inf')):
                     cost[q]=nc; prev[q]=n; heapq.heappush(heap,(nc+h(q),nc,q))
         return None,None
+
+class Search:
+    """Resumable A* so long routes do not monopolize a decision."""
+    def __init__(self,g,start,goal,weight):
+        self.g=g; self.start=g.nearest(start); self.goal=g.nearest(goal); self.weight=weight
+        self.gx=self.goal%g.nx; self.gy=self.goal//g.nx
+        self.heap=[(self.h(self.start),0,self.start)]; self.cost={self.start:0}; self.prev={}
+    def h(self,n): return math.hypot(n%self.g.nx-self.gx,n//self.g.nx-self.gy)
+    def step(self,deadline):
+        g=self.g; count=0
+        while self.heap:
+            _,c,n=heapq.heappop(self.heap)
+            if c!=self.cost.get(n): continue
+            if n==self.goal:
+                path=[n]
+                while n!=self.start: n=self.prev[n]; path.append(n)
+                return list(reversed(path))
+            for q,d in g.neighbors(n):
+                nc=c+d*(1+self.weight*(g.value(q,3)/255+(1-g.value(q,4)/255)*.3))
+                if nc<self.cost.get(q,float('inf')):
+                    self.cost[q]=nc; self.prev[q]=n; heapq.heappush(self.heap,(nc+self.h(q),nc,q))
+            count+=1
+            if count%32==0 and time.perf_counter()>deadline: return None
+        return []

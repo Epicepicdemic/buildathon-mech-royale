@@ -1,6 +1,6 @@
 import math, time
 import mechfight as mf
-from navigation import Grid
+from navigation import Grid, Search
 
 def lead(origin, target, velocity, speed):
     r=[target[i]-origin[i] for i in range(3)]; a=sum(v*v for v in velocity)-speed*speed; b=2*sum(r[i]*velocity[i] for i in range(3)); c=sum(x*x for x in r); disc=b*b-4*a*c
@@ -12,7 +12,7 @@ def angle(a,b): return abs((a-b+math.pi)%(2*math.pi)-math.pi)
 class Bot:
     name='Wilce'
     def __init__(self,hello):
-        self.cfg=hello['config']; self.grid=Grid(); self.path=[]; self.goal=None; self.last_plan=-100; self.last_pos=None; self.stuck=0; self.opening=True; self.hurt=-100; self.healing=False; self.attacker=None
+        self.cfg=hello['config']; self.grid=Grid(); self.path=[]; self.goal=None; self.last_plan=-100; self.last_pos=None; self.stuck=0; self.opening=True; self.hurt=-100; self.healing=False; self.attacker=None; self.search=None; self.search_goal=None
     def act(self,o):
         now=time.perf_counter(); me=o['self']; pos=me['pos']; t=o['t']; g=self.grid; act={'tick':o['tick']}; enemies=o.get('mechs',[]); threats=[e for e in enemies if e['kind']=='mech']
         for event in o.get('events',[]):
@@ -57,11 +57,15 @@ class Bot:
             if choices: goal=min(choices,key=lambda c:math.dist(c['pos'][:2],pos[:2]))['pos'][:2]
             elif drops: goal=min(drops,key=lambda d:math.dist(d['pos'][:2],pos[:2]))['pos'][:2]
             elif dist<=target_radius and not threats: goal=[20,-85] if math.dist([20,-85],center)<target_radius else goal
-        if self.goal is None or math.dist(goal,self.goal)>12 or (t-self.last_plan>3 and not self.path):
-            # Bound work on each decision; retry later if search cannot finish.
-            path,_=g.route(pos,goal,0 if urgent else .45,now+.009)
-            self.last_plan=t
-            if path: self.path=path; self.goal=goal
+        if self.search is None and (self.goal is None or math.dist(goal,self.goal)>12 or (t-self.last_plan>3 and not self.path)):
+            self.search=Search(g,pos,goal,0 if urgent else .45); self.search_goal=goal[:]; self.last_plan=t
+        if self.search is not None:
+            if math.dist(goal,self.search_goal)>20 or (urgent and self.search.weight):
+                self.search=Search(g,pos,goal,0 if urgent else .45); self.search_goal=goal[:]
+            path=self.search.step(now+.009)
+            if path is not None:
+                if path: self.path=path; self.goal=self.search_goal
+                self.search=None
         while len(self.path)>1 and math.dist(pos[:2],g.xy(self.path[1]))<4: self.path.pop(0)
         dest=g.xy(self.path[1]) if len(self.path)>1 else (goal if g.visible(pos,goal,0) else pos)
         dx=dest[0]-pos[0]; dy=dest[1]-pos[1]; d=math.hypot(dx,dy)
