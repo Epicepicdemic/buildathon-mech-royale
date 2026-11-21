@@ -196,6 +196,9 @@ class Mover:
                 fol = routing.Follower(w, pts)
                 tx, ty, rem, off = fol.target(x, y)
                 move = unit(tx - x, ty - y)
+                if evasive and exposed:
+                    # under fire on the way back: jink, keeping most of the heading
+                    move = self._jink(me, move, threat_yaw, base_w=1.6)
                 boost = self.booster.want(True, me.energy)
                 self.last_move = move
                 st = self.stuck.update(t, x, y, True)
@@ -316,14 +319,14 @@ class Mover:
         self.escape = (best[1], best[2], 1)
         return self.escape
 
-    def _jink(self, me, move, threat_yaw):
-        u = self.jinker.direction(me.t, move, threat_yaw)
+    def _jink(self, me, move, threat_yaw, base_w=None):
+        u = self.jinker.direction(me.t, move, threat_yaw, base_w)
         if u is None:
             return move
         x, y = me.pos[0], me.pos[1]
         if not self.w.walkable(x, y, x + u[0] * 5.0, y + u[1] * 5.0, need=2.7, skip_start=1.0):
             self.jinker.flip()
-            u2 = self.jinker.direction(me.t, move, threat_yaw)
+            u2 = self.jinker.direction(me.t, move, threat_yaw, base_w)
             if u2 is None or not self.w.walkable(x, y, x + u2[0] * 5.0, y + u2[1] * 5.0, need=2.7, skip_start=1.0):
                 return move
             return u2

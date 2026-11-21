@@ -10,12 +10,20 @@ it against bullets that real bots fired in recorded matches (see that tool for t
 
 Version 2 used legs of 0.30-0.55 s. At 58.5 m/s^2 a reversal from walking speed takes 0.4 s, so
 those legs barely reached speed before turning back: the mech wobbled around a point that was
-easy to hit. Version 3's legs (LEG_S) were chosen from the recorded bullets.
+easy to hit. Version 3's legs (LEG_S) were chosen from 5,193 bullets real bots fired in 12 recorded
+team matches (tools/replay_shooting.py), flown against a mech starting where the real target was,
+at the same velocity, then moving our way. Hit rates at 45-78 / 78-150 / 150-235 m:
+    the real targets               80% / 54% / 40%
+    straight on                    89% / 83% / 69%
+    version 2 jink, walking        76% / 48% / 32%
+    0.6-1.4 s legs, walking        74% / 41% / 25%
+    0.6-1.4 s legs, boosting       65% / 26% / 10%
+So under fire beyond 45 m we jink on long legs and boost while the energy lasts (tactics.py).
 """
 import math
 
 V2_LEG_S = (0.30, 0.55)
-LEG_S = (0.45, 1.05)        # version 3 (chosen in tools/replay_shooting.py: real bullets, real ranges)
+LEG_S = (0.6, 1.4)          # version 3 (chosen in tools/replay_shooting.py: real bullets, real ranges)
 P_FLIP = 0.8                # chance a new leg reverses the last one
 
 
@@ -29,9 +37,10 @@ class Jinker:
         self.sign = 1
         self.until = -1e9
 
-    def direction(self, t, move, threat_yaw):
+    def direction(self, t, move, threat_yaw, base_w=None):
         """Unit move direction for this decision, or None when there is nothing to jink across.
-        `move`: where the legs were going anyway (may be zero). `threat_yaw`: bearing to the threat."""
+        `move`: where the legs were going anyway (may be zero). `threat_yaw`: bearing to the threat.
+        `base_w`: weight on `move` (a zone run keeps more of its heading)."""
         if t >= self.until:
             if self.rng.random() < self.p_flip:
                 self.sign = -self.sign
@@ -43,8 +52,9 @@ class Jinker:
         else:
             return None
         s = self.sign
-        mx = move[0] * self.base_w + px * s * self.perp_w
-        my = move[1] * self.base_w + py * s * self.perp_w
+        bw = self.base_w if base_w is None else base_w
+        mx = move[0] * bw + px * s * self.perp_w
+        my = move[1] * bw + py * s * self.perp_w
         n = math.hypot(mx, my)
         if n < 1e-9:
             return None

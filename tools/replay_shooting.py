@@ -298,8 +298,9 @@ def real_shots(m):
             q = tr.at(t0)
             if q is None:
                 continue
+            # the bullet is `along` metres ahead of this mech on its line of flight
             ox, oy = xa - q[0], ya - q[1]
-            along = -(ox * d[0] + oy * d[1]) / max(1e-6, math.hypot(d[0], d[1]))
+            along = (ox * d[0] + oy * d[1]) / max(1e-6, math.hypot(d[0], d[1]))
             perp = abs(ox * d[1] - oy * d[0]) / max(1e-6, math.hypot(d[0], d[1]))
             if 0 <= along <= 35 and perp < 3.0 and (shooter is None or along < shooter[0]):
                 shooter = (along, i, q)

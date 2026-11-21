@@ -390,6 +390,14 @@ class Tactics:
                 intent.label = (intent.label or "") + " +fire"
         p = best.est_pos(t)
         dec.face = bearing(me.pos, p)
+        dec.threat_yaw = dec.face
+        # and dodge: long jink legs across its line of fire, boosting beyond 45 m while energy
+        # lasts (mech/dodge.py: real bullets hit that 65/26/10% at 45-78/78-150/150+ m, against
+        # 76/48/32% for version 2's short walking jink)
+        if not dec.hold or intent is None or intent.spot != "peek":
+            dec.evasive = True
+        if self._dist(me, best) >= 45.0 and me.energy > 35.0 and me.grounded and dec.speed != "silent":
+            dec.speed = "boost"
         dec.label = intent.label if intent is not None else dec.label
 
     def _decide(self, me, obs):
