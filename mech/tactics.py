@@ -22,7 +22,7 @@ UPGRADE_PRIORITY = {
     "servos": 50, "capacitor": 48, "jets": 44, "reactor": 42, "gyros": 40, "sensors": 38,
     "mortar_reload": 20, "mortar_velocity": 18, "mortar_splash": 16, "laser_pierce": 30,
 }
-WANTED_WEAPONS = ("laser", "lightning")     # in order of preference: kills happen at range
+WANTED_WEAPONS = ("laser", "lightning")     # held together; neither is dropped for the other
 OPENING_S = 30.0        # the first seconds of a match, when being seen is what kills
 COMMIT_FIGHT_S = 3.0    # a fight is held this long unless something real changes
 COMMIT_BREAK_S = 1.5    # a break is held this long before turning back to fight
@@ -396,18 +396,24 @@ class Tactics:
 
     # ------------------------------------------------------------------ loot
     def _swap_slot(self, me, kind):
-        """For a wanted pickup of `kind`: None to take it into a free slot, a slot number to drop
-        for it, or False to leave it. A mortar is always given up (cook-off)."""
-        if kind in (w.kind for w in me.weapons):
+        """For a wanted pickup of `kind` (laser or lightning): None to take it into a free slot, a
+        slot number to drop for it, or False to leave it.
+
+        Laser and lightning are held together (the chair, Sat 07:20): never drop one for the other.
+        With both slots full, a mortar goes first (it makes every laser hit us 60% harder), and
+        otherwise the gun, which is the only way the rules allow the two to be held at once.
+        A laser that is charging cannot be swapped out, so that never comes up here."""
+        if kind not in WANTED_WEAPONS or kind in (w.kind for w in me.weapons):
             return False
         if me.slots_free:
             return None
         mort = me.by_kind.get("mortar")
         if mort is not None:
             return mort.slot
-        light = me.by_kind.get("lightning")
-        if kind == "laser" and light is not None:
-            return light.slot if light.cooldown <= 0.2 else False
+        other = "lightning" if kind == "laser" else "laser"
+        gun = me.by_kind.get("gun")
+        if gun is not None and other in me.by_kind:
+            return gun.slot
         return False
 
     def loot_choice(self, me, obs):
@@ -428,7 +434,7 @@ class Tactics:
             d = math.hypot(pp[0] - me.pos[0], pp[1] - me.pos[1])
             if d > 80 or abs(pp[2] - me.pos[2]) > 6:
                 continue
-            d_eff = d * (0.5 if k == "laser" else 1.0)
+            d_eff = d * 0.5             # laser and lightning alike: the pair is what we want
             if best is None or d_eff < best[0]:
                 best = (d_eff, ("pickup", p["id"], (pp[0], pp[1]), drop, abs(pp[2] - me.pos[2]) <= 4 and d <= reach - 0.3))
         for c in obs.get("cubes") or []:

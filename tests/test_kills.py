@@ -92,3 +92,53 @@ class FightingRetreatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LoadoutTests(unittest.TestCase):
+    """Item 3: laser and lightning together; the gun is what goes when both slots are full."""
+
+    def take_at_feet(self, weapons, kind):
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.opening_done = True
+        me = (300.0, -60.0)
+        obs = zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=100.0, weapons=weapons))
+        obs["pickups"] = [{"id": 8001, "kind": kind, "pos": [me[0] + 1.0, me[1], w.floor(*me)]}]
+        return bot.act(obs)
+
+    def test_laser_with_gun_and_lightning_drops_the_gun(self):
+        a = self.take_at_feet([weapon("gun"), weapon("lightning")], "laser")
+        self.assertEqual(a.get("take"), 8001)
+        self.assertEqual(a.get("drop"), 0)          # the gun's slot, not lightning's
+
+    def test_lightning_with_gun_and_laser_drops_the_gun(self):
+        a = self.take_at_feet([weapon("gun"), weapon("laser")], "lightning")
+        self.assertEqual(a.get("take"), 8001)
+        self.assertEqual(a.get("drop"), 0)
+
+    def test_never_drops_one_of_the_pair_for_the_other(self):
+        a = self.take_at_feet([weapon("laser"), weapon("lightning")], "laser")
+        self.assertNotIn("take", a)
+
+    def test_mortar_still_goes_first(self):
+        a = self.take_at_feet([weapon("gun"), weapon("mortar")], "lightning")
+        self.assertEqual(a.get("take"), 8001)
+        self.assertEqual(a.get("drop"), 1)
+
+    def test_fights_without_a_gun(self):
+        """Laser and lightning, no gun: the bot still fights a close attacker (lightning fires)."""
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.opening_done = True
+        me = (300.0, -60.0)
+        aim = [0.0, 0.0]
+        fired = False
+        for k in range(10):
+            obs = zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=120.0 + 0.1 * k, aim=aim,
+                                    weapons=[weapon("laser"), weapon("lightning")]))
+            obs["mechs"] = [enemy(9, 330.0, -60.0, w, math.pi, weapons=("gun",))]
+            obs["events"] = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 9}] if k % 2 == 0 else []
+            a = bot.act(obs)
+            aim = a["aim"]
+            fired = fired or a["fire"][1] or a["fire"][0]
+        self.assertTrue(fired)
