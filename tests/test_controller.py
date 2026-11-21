@@ -135,3 +135,27 @@ class GhostTargetTests(unittest.TestCase):
         self.assertTrue(bot.threats.tracks[6].dead)
         self.assertTrue(fired_at)
         self.assertTrue(all(abs(d) < 10 for d in fired_at), fired_at)      # east, at the attacker
+
+
+class LootTests(unittest.TestCase):
+    def _take(self, pickups, weapons=None):
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.opening_done = True
+        me = (300.0, -60.0)
+        f = w.floor(*me)
+        obs = self_obs(pos=(me[0], me[1], f), t=40.0, weapons=weapons)
+        obs["pickups"] = [{"id": 8000 + i, "kind": k, "pos": [me[0] + 1.0 + i, me[1], f]} for i, k in enumerate(pickups)]
+        return bot.act(obs)
+
+    def test_takes_a_laser_first_and_never_a_mortar(self):
+        a = self._take(["mortar", "lightning", "laser"])
+        self.assertEqual(a.get("take"), 8002)
+        a = self._take(["mortar"])
+        self.assertNotIn("take", a)
+
+    def test_swaps_lightning_for_a_laser(self):
+        from tests.helpers import weapon
+        a = self._take(["laser"], weapons=[weapon("gun"), weapon("lightning")])
+        self.assertEqual(a.get("take"), 8000)
+        self.assertEqual(a.get("drop"), 1)

@@ -197,10 +197,9 @@ class Tactics:
         for p in obs.get("pickups") or []:
             k = p.get("kind")
             pp = p.get("pos")
+            # never a mortar: carrying one makes every laser hit us 60% harder (cook-off)
             if k not in WANTED_WEAPONS or k in kinds:
-                if not (k == "mortar" and not me.slots_free == [] and len(kinds) < 2 and t > 90 and "mortar" not in kinds
-                        and not any(x in kinds for x in WANTED_WEAPONS)):
-                    continue
+                continue
             drop = None
             if not me.slots_free:
                 # swap a mortar for any wanted weapon, and lightning for a laser; never drop the gun
@@ -217,7 +216,7 @@ class Tactics:
             d = math.hypot(pp[0] - me.pos[0], pp[1] - me.pos[1])
             if d > 80 or abs(pp[2] - me.pos[2]) > 6:
                 continue
-            d_eff = d * (0.7 if k == "laser" else 1.0)
+            d_eff = d * (0.5 if k == "laser" else 1.0)
             if best is None or d_eff < best[0]:
                 best = (d_eff, ("pickup", p["id"], (pp[0], pp[1]), drop, abs(pp[2] - me.pos[2]) <= 4 and d <= reach - 0.3))
         for c in obs.get("cubes") or []:

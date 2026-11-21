@@ -120,7 +120,9 @@ class Bot:
         """Pick up a wanted weapon we are standing on, whatever else we are doing."""
         reach = float((self.cfg.get("loot") or {}).get("pickup_radius", 4.0))
         kinds = [w.kind for w in me.weapons]
-        for p in obs.get("pickups") or []:
+        # a laser before lightning: kills happen at range
+        order = {"laser": 0, "lightning": 1}
+        for p in sorted(obs.get("pickups") or [], key=lambda q: order.get(q.get("kind"), 9)):
             k = p.get("kind")
             if k not in ("laser", "lightning") or k in kinds:
                 continue
@@ -131,6 +133,9 @@ class Bot:
                 mort = me.by_kind.get("mortar")
                 if mort is not None:
                     return p["id"], mort.slot
+                light = me.by_kind.get("lightning")
+                if k == "laser" and light is not None and light.cooldown <= 0.2:
+                    return p["id"], light.slot
         return None, None
 
 
