@@ -39,23 +39,31 @@ def cube_mult(cubes, cfg=None):
     return 1.0 + float(c.get("damage_per_cube", 0.04)) * min(cubes or 0, int(c.get("stat_cap", 10)))
 
 
-def gun_hit_prob(dist, dodging, airborne=False, speed=252.0, spread_deg=0.6, rng=230.0):
-    """Chance a led gun shot lands. Inside the reversal range a led shot lands whatever the
-    target does; beyond it a dodging target is mostly missed. Spread costs a little at range."""
+def hit_prob(dist, dodging, rng=230.0):
+    """Chance a led gun shot lands at this range, measured (version 3): against the targets in the
+    recorded team matches 96/82/59/42% at <45/45-78/78-150/150+ m (recon/replays.md); against a
+    target jinking as ours does, 89/65/26/10% (real bullets flown against our pattern,
+    tools/replay_shooting.py). The same table serves both sides of the fight calculation."""
     if dist > rng:
         return 0.0
-    sigma = math.radians(spread_deg) * dist
-    p_spread = 1.0 if sigma < 0.5 else min(1.0, 2.5 / (sigma * 2.2))
-    p_spread = max(0.6, min(1.0, p_spread))
-    rr = reversal_range(speed, accel=12.0 if airborne else 58.5)
-    if dist <= rr:
-        return p_spread
-    # recorded matches: ~59% of shots hit at 78-150 m and ~42% beyond, against bots that mostly do
-    # not dodge; a target that keeps changing direction is much harder
-    base = 0.62 if dist <= 150 else 0.45
     if dodging:
-        base *= 0.45
-    return min(p_spread, base)
+        return 0.89 if dist <= 45.0 else 0.65 if dist <= 78.0 else 0.26 if dist <= 150.0 else 0.10
+    return 0.96 if dist <= 45.0 else 0.82 if dist <= 78.0 else 0.59 if dist <= 150.0 else 0.42
+
+
+def gun_hit_prob(dist, dodging, airborne=False, speed=252.0, spread_deg=0.6, rng=230.0):
+    """Chance our led gun shot lands on a target (see hit_prob). A target in the air cannot dodge
+    (12 m/s^2 of air control)."""
+    return hit_prob(dist, dodging and not airborne, rng)
+
+
+def their_gun_hit_prob(dist, we_dodge=True, rng=230.0):
+    """Chance an enemy's gun shot lands on us: the same measured table (hit_prob), dodging when we
+    are on the ground (we jink under fire). Version 2 gave them 0.8 inside 78 m while giving our
+    gun about 1.0, so two equal mechs at 40 m looked like a fight we win by a quarter, and version
+    3's first build assaulted in the open and lost those duels (sandbox seeds 22, 25 and 58: dead
+    before 40 s after dealing 1,080-1,395 damage)."""
+    return hit_prob(dist, we_dodge, rng)
 
 
 def gun_dps(stats, cubes, cfg=None):
@@ -205,13 +213,7 @@ class FightCalc:
             st = _wstats(cfg, kind)
             if kind == "gun":
                 _, sus = gun_dps(st or {}, getattr(e, "cubes", 0), cfg)
-                rr = reversal_range(float((st or {}).get("speed", 252.0)), accel=12.0 if sit.airborne else 58.5)
-                if dist > float((st or {}).get("range", 230.0)):
-                    p = 0.0
-                elif dist <= rr or not we_dodge:
-                    p = 0.8
-                else:
-                    p = max(0.15, 0.8 * rr / dist * 0.6)
+                p = their_gun_hit_prob(dist, we_dodge, float((st or {}).get("range", 230.0)))
                 tot += sus * p
             elif kind == "laser":
                 if dist <= float((st or {}).get("range", 280.0)):

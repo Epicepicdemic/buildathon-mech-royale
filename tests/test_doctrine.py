@@ -109,12 +109,28 @@ class ChoosePlayTests(unittest.TestCase):
         self.assertEqual(D.choose_play(sit(e))[0], D.BREAK)
 
     def test_hysteresis_holds_the_current_play(self):
-        e = track(pos=(60, 0, 0), hp=1100)
+        e = track(pos=(60, 0, 0), hp=1200)
         s = sit(e)
         calc = D.FightCalc(s, e)
         self.assertTrue(1.3 <= calc.ratio < 1.7, calc.ratio)
         self.assertEqual(D.choose_play(s, calc, prev=D.ASSAULT)[0], D.ASSAULT)
         self.assertEqual(D.choose_play(s, calc, prev=D.CORNER)[0], D.CORNER)
+
+
+class SymmetryTests(unittest.TestCase):
+    def test_equal_mechs_close_up_is_not_an_assault(self):
+        """Two equal gun mechs at 40 m are an even fight (both sides hit about 9 shots in 10): fight
+        from cover, do not charge. Version 3's first build scored this 1.25 in our favour and lost
+        three early duels in the sandbox by assaulting."""
+        e = track(pos=(40, 0, 0), hp=1400, sees_us=True)
+        play, calc = D.choose_play(sit(e))
+        self.assertLess(calc.ratio, D.ASSAULT_RATIO)
+        self.assertGreater(calc.ratio, 0.8)
+        self.assertEqual(play, D.CORNER)
+
+    def test_both_sides_use_the_same_table(self):
+        for d in (30.0, 60.0, 120.0, 190.0):
+            self.assertEqual(D.gun_hit_prob(d, True), D.their_gun_hit_prob(d, True))
 
 
 class HunterTests(unittest.TestCase):
