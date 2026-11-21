@@ -181,3 +181,24 @@ class AirTableTests(unittest.TestCase):
         move, boost, jump, done = hop.step(me)
         self.assertFalse(jump)
         self.assertGreater(move[0], 0.9)       # toward the launch cell first, not the roof
+
+
+class HopRetryTests(unittest.TestCase):
+    def test_a_climb_that_falls_back_jumps_again(self):
+        """Sandbox seed 48: a hop cleared the top in the air, fell back below it, then walked into
+        the wall until it timed out. On the ground below the top it must jump again."""
+        from mech import routing
+        info = routing.HopInfo(0, top=8.0, energy=10, land_floor=0.0, launch_floor=0.0)
+        h = routing.Hop(0.0, (0.0, 0.0), (6.0, 0.0), info)
+        mv, boost, jump = h.step(0.0, 0.0, 0.0, 0.0, True, 100.0)
+        self.assertTrue(jump)
+        h.step(0.3, 0.2, 0.0, 9.0, False, 90.0)           # above the top in the air: cleared
+        self.assertTrue(h.cleared)
+        mv, boost, jump = h.step(1.0, 1.0, 0.0, 0.0, True, 80.0)   # back on the ground below it
+        self.assertTrue(jump)
+        self.assertFalse(h.failed)
+        h.step(1.3, 1.0, 0.0, 3.0, False, 75.0)
+        h.step(2.0, 1.0, 0.0, 0.0, True, 70.0)
+        h.step(2.3, 1.0, 0.0, 3.0, False, 65.0)
+        h.step(3.0, 1.0, 0.0, 0.0, True, 60.0)
+        self.assertTrue(h.failed)                          # third fall back: give up (and ban it)

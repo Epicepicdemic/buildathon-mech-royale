@@ -253,6 +253,11 @@ class Mover:
                     return res
         if self.fol is not None and not hold:
             tx, ty, rem, off = self.fol.target(x, y)
+            if me.grounded and self.route is not None and self.goal is not None and \
+                    abs(w.floor(tx, ty) - me.pos[2]) > 2.5 and self.fol.hop_due(x, y) is None:
+                # off a roof the route crosses (or below one it climbs): that point is out of reach
+                # on foot from here, so plan again from where we are
+                off = 99.0
             if off > 10.0 and self.route is not None and self.goal is not None:
                 # knocked off the route: plan again from here
                 self.replans += 1

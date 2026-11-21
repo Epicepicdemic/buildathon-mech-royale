@@ -136,7 +136,15 @@ class Hop:
             return (0.0, 0.0), False, False
         climb = info.top > z + 0.6 and not self.cleared
         if grounded:
-            near_land = d < 3.0 or (abs(z - info.land_floor) < 1.3 and d < 7.0 and t - self.t0 > 0.4)
+            # on the ground below the top (a climb that fell back, even after clearing it in the
+            # air): jump again; walking on would press into the wall until the timeout
+            climb = info.top > z + 0.6
+            # landed: near the landing node, or past most of the hop at the landing floor (on the
+            # launch side of a thin wall the floor is the same height, so the side matters)
+            lx, ly = self.land[0] - self.launch[0], self.land[1] - self.launch[1]
+            L2 = lx * lx + ly * ly
+            along = ((x - self.launch[0]) * lx + (y - self.launch[1]) * ly) / L2 if L2 > 1e-6 else 1.0
+            near_land = d < 3.0 or (along >= 0.6 and abs(z - info.land_floor) < 1.3 and d < 7.0 and t - self.t0 > 0.4)
             if info.land_floor > info.launch_floor + 1.2 and z < info.land_floor - 1.0:
                 near_land = False      # a climb is done only once we are up there
             if self.left_ground and near_land:
@@ -153,6 +161,7 @@ class Hop:
                     self.failed = True
                     return (0.0, 0.0), False, False
             self.left_ground = True
+            self.cleared = False
             return mv, False, True
         self.left_ground = True
         if z >= info.top + self.CLEAR - 0.05:
