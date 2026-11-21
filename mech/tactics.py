@@ -152,11 +152,12 @@ class Tactics:
         return None
 
     def laser_threat(self, me):
-        """An enemy charging a laser that points at us and can see us."""
+        """An enemy charging a laser that can see us or points near us. A torso turns 4 rad/s and a
+        charge takes 0.75 s, so a laser charging 0.2 rad off us is still ours (red team probe)."""
         for tr in self.th.active_mechs(me.t, 1.0):
             if tr.charging and tr.in_obs:
                 b = bearing(tr.pos, me.pos)
-                if angdiff(tr.yaw, b) < 0.12:
+                if tr.sees_us or angdiff(tr.yaw, b) < 0.6:
                     return tr
         return None
 
