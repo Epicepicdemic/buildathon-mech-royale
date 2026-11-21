@@ -151,6 +151,9 @@ class Gunner:
                     # real bots mostly do not dodge: full bursts at range unless this one is changing direction
                     long_ok = dist <= rr or tgt.kind != "mech" or tr is None or not tr.dodging() or tr.still() \
                         or not tr.sees_us
+                    # beyond the reversal range a full burst is heard at 320 m: only with cover one step away
+                    if dist > rr and not getattr(intent, "cover_near", True):
+                        long_ok = False
                     eff = mode
                     if mode == "long" and not long_ok:
                         eff = "short"

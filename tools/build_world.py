@@ -14,7 +14,10 @@ lookup tables that `mech/world.py` loads with the standard library:
   fan     uint8 x 32 distance (m, cap 255) to the first mech-hiding wall per direction
   canopy  int16 x 2  lowest crown base / highest crown top over the cell (dm), or 0/0
   roof    int16 dm   roof height if a mech can stand here on a roof, else -32768
-A JSON block carries strongpoints, roof patches and the parameters used.
+  arc     uint8      share of directions with a hiding wall within 12 m (x255)
+  main    uint8      1 = node in the main walkable area
+A JSON block carries the roof patches and the parameters used. No ranked list of positions is
+shipped: the bot scores cells against the live threats each time.
 
 Usage: python3 tools/build_world.py ARENA_DIR OUT_FILE
 """
@@ -343,32 +346,12 @@ def build(arena, out):
     FAN[vv, uu, :] = fan
     log(f"viewshed {time.time() - t0:.1f}s exposure median={np.median(expo):.3f}")
 
-    # ---- strongpoints: low exposure, hiding wall close on a wide arc
+    # ---- wall arc: share of directions with a hiding wall within 12 m (no ranked list of positions is
+    # shipped: the bot scores cells against the live threats and picks among good ones at random)
     near = (fan <= 12)
-    dbl = np.concatenate([near, near], 1)
-    run = np.zeros(len(px), int)
-    best = np.zeros(len(px), int)
-    for a in range(2 * NDIR):
-        run = np.where(dbl[:, a], run + 1, 0)
-        best = np.maximum(best, run)
-    arc = np.minimum(best, NDIR) * (360.0 / NDIR)
-    openn = (fan >= 40)
-    exits = (openn & ~np.roll(openn, 1, axis=1)).sum(1)
-    score = (1 - expo) + arc / 360.0 + 0.1 * np.minimum(exits, 3)
-    cand = (arc >= 120) & (exits >= 1) & (expo <= 0.25)
-    order = np.argsort(-score)
-    chosen = []
-    taken = np.zeros((NV // 8 + 2, NU // 8 + 2), bool)   # 16 m buckets for separation
-    for idx in order:
-        if not cand[idx]:
-            continue
-        bu, bv = uu[idx] // 8, vv[idx] // 8
-        if taken[max(0, bv - 1):bv + 2, max(0, bu - 1):bu + 2].any():
-            continue
-        taken[bv, bu] = True
-        chosen.append(idx)
-    strong = [[round(float(px[i]), 1), round(float(py[i]), 1), round(float(expo[i]), 3), int(arc[i]), int(exits[i])] for i in chosen]
-    log(f"strongpoints {len(strong)} {time.time() - t0:.1f}s")
+    ARC = np.zeros((NV, NU), np.uint8)
+    ARC[vv, uu] = np.round(near.mean(1) * 255).astype(np.uint8)
+    log(f"wall arc {time.time() - t0:.1f}s")
 
     # ---- roofs: where a mech can stand on top of a building
     roof = np.full((NV, NU), -1e9)
@@ -422,13 +405,13 @@ def build(arena, out):
         "roof": ROOF.astype("<i2"),
         "roof_id": np.where(lab >= 0, lab, 65535).astype("<u2"),
         "main": MAIN,
+        "arc": ARC,
     }
     meta = {
         "nx": nx, "ny": ny, "x0": x0, "y0": y0, "step": T["step"],
         "nu": NU, "nv": NV, "res": 2.0, "nfan": NDIR,
         "bounds": B, "dirs": DIRS,
         "params": {"plan_clear": PLAN_CLEAR, "edge_clear": EDGE_CLEAR, "slope_limit_deg": 46.0, "hide_h": HIDE_H},
-        "strongpoints": strong,
         "roofs": patches,
         "layers": {},
     }

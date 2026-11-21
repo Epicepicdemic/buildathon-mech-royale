@@ -5,9 +5,13 @@ The same rules run in every match. Nothing here tries to tell practice from the 
 """
 import math
 
+import random
+import time
+
 from . import air as A
 from . import doctrine as D
-from .cover import LowExposureSearch
+from . import positions as P
+from .cover import HideSearch, LowExposureSearch
 from .geom import angdiff, bearing, wrap
 from .gunner import Target
 
@@ -69,12 +73,33 @@ class Tactics:
         self.roof_mode = False       # we mean to be on a roof
         self.roof_spots = None       # (peek, hide, t) on the roof
         self.air_ban_until = -1e9
+        self.rng = random.Random((seed or 0) ^ 0x5A17)
+        self.prev_corner_spot = None
+        self.displace = None         # ((x, y), until): moving off a spot a mortar may be falling on
+        self.second_goal = None      # the opening's second, unseen position
+        self.second_search = None
+        self.spawn = None
+        self.first_reached = False
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
     def _dist(me, tr):
         p = tr.est_pos(me.t)
         return math.hypot(p[0] - me.pos[0], p[1] - me.pos[1])
+
+    def _shootable(self, me, enemies):
+        """The best enemy we can see and reach with a weapon now: whoever hit us last, else the nearest."""
+        best = None
+        for e in enemies:
+            if not e.los or not e.in_obs:
+                continue
+            d = self._dist(me, e)
+            if d > 230.0:
+                continue
+            score = d - (200.0 if me.t - e.t_hit_us <= 2.0 else 0.0)
+            if best is None or score < best[0]:
+                best = (score, e)
+        return best[1] if best else None
 
     def _me_weapons(self, me):
         return {w.kind: w.stats for w in me.weapons}
@@ -124,51 +149,19 @@ class Tactics:
 
     # ------------------------------------------------------------------ positions
     def hold_spot(self, me):
-        """A strongpoint inside the next circle: low exposure, walls around, not far from us."""
+        """A covered cell inside the next circle, scored against the current threats and drawn at
+        random among the best few (mech/positions.py). Kept for a while once chosen."""
         z = self.zone
         cx, cy, rs = self.mv.safe_circle(z)
         key = (z.version, round(cx), round(cy))
-        if self.hold_goal is not None and key == self.hold_key and me.t - self.hold_t < 20.0:
+        if self.hold_goal is not None and key == self.hold_key and me.t - self.hold_t < 25.0 \
+                and math.hypot(self.hold_goal[0] - cx, self.hold_goal[1] - cy) <= rs:
             return self.hold_goal
-        best = None
-        inner = rs - 6.0
-        for sp in self.w.strongpoints:
-            x, y, expo, arc, exits = sp
-            dc = math.hypot(x - cx, y - cy)
-            if dc > inner:
-                continue
-            n = self.w.node(x, y)
-            if not self.w.main[n]:
-                continue
-            d = math.hypot(x - me.pos[0], y - me.pos[1])
-            score = d + 350.0 * expo + 0.35 * dc - 25.0 * (arc / 360.0)
-            if best is None or score < best[0]:
-                best = (score, (x, y))
-        if best is None:
-            # small circle: the least exposed walkable node near the centre
-            best = None
-            r = max(2.0, inner)
-            step = 2
-            u0 = int((cx - r - self.w.x0) / self.w.res)
-            u1 = int((cx + r - self.w.x0) / self.w.res) + 1
-            v0 = int((cy - r - self.w.y0) / self.w.res)
-            v1 = int((cy + r - self.w.y0) / self.w.res) + 1
-            for v in range(max(0, v0), min(self.w.nv, v1 + 1), step):
-                for u in range(max(0, u0), min(self.w.nu, u1 + 1), step):
-                    n = v * self.w.nu + u
-                    if not self.w.main[n]:
-                        continue
-                    x, y = self.w.node_xy(n)
-                    dc = math.hypot(x - cx, y - cy)
-                    if dc > r:
-                        continue
-                    score = 120.0 * self.w.expo[n] / 255.0 + dc * (1.5 if z.next_radius < 30 else 0.4)
-                    if best is None or score < best[0]:
-                        best = (score, (x, y))
-            if best is None:
-                n = self.w.nearest_free(cx, cy, 30)
-                best = (0, self.w.node_xy(n) if n is not None else (cx, cy))
-        self.hold_goal = best[1]
+        threats = self.th.threat_points(me, 20.0)
+        n = P.choose_hold(self.w, me.xy, (cx, cy, max(2.0, rs - 4.0)), threats, self.rng)
+        if n is None:
+            n = self.w.nearest_free(cx, cy, 30)
+        self.hold_goal = self.w.node_xy(n) if n is not None else (cx, cy)
         self.hold_key = key
         self.hold_t = me.t
         return self.hold_goal
@@ -277,6 +270,8 @@ class Tactics:
     def decide(self, me, obs):
         t = me.t
         dec = Decision()
+        if self.spawn is None:
+            self.spawn = tuple(me.pos)
         th = self.th
         z = self.zone
         # offers
@@ -331,10 +326,17 @@ class Tactics:
             self.expose_t, self.expose_hp = None, None
         ctx["hurt_in_exposure"] = self.expose_hp is not None and self.expose_hp - me.hp > max(300.0, 0.22 * me.max_hp)
         intent = D.PLAYS[play].act(sit, ctx)
+        hx = self.cov.hide_xy()
+        intent.cover_near = hx is not None and math.hypot(hx[0] - me.pos[0], hx[1] - me.pos[1]) <= 12.0
         dec.intent = intent
         self.healing = False
         if target is not None:
             dec.target = Target.from_track(target, t, float((self.cfg.get("cubes") or {}).get("size_per_cube", 0.05)))
+            # return fire: if the chosen target cannot be shot now, shoot whoever can be (attackers first)
+            if play in (D.ASSAULT, D.CORNER, D.HARASS) and not target.los:
+                alt = self._shootable(me, enemies)
+                if alt is not None:
+                    dec.target = Target.from_track(alt, t)
         # ---------------- the air: a manoeuvre in progress, or one worth starting
         watchers = self.watchers(me)
         if self._air(me, obs, dec, play, target, calc, enemies, slack):
@@ -357,6 +359,9 @@ class Tactics:
             self.cov.want_hide(me, watchers, t, max_cost=60.0)
             if target is not None:
                 self.cov.want_peek(Target.from_track(target, t).center(), t)
+            if intent.spot == "hide" and self.prev_corner_spot == "peek":
+                self.cov.peek_used()        # never step out of the same edge twice running
+            self.prev_corner_spot = intent.spot
             if intent.goal is not None:
                 self.mv.go(intent.goal, me, z, prefer_cover=False, tag="corner-" + str(intent.spot), replan_dist=2.5)
             else:
@@ -371,9 +376,21 @@ class Tactics:
                 self.mv.clear()
             dec.evasive = True
         elif play == D.BREAK:
+            hide = self.cov.hide_xy()
+            hit_now = t - th.t_taken <= 1.0
+            if hit_now and hide is not None and math.hypot(hide[0] - me.pos[0], hide[1] - me.pos[1]) < 3.0:
+                # we are "hidden" and still being hit: our sight estimate is wrong here, find another spot
+                self.cov.reset()
+                hide = None
             if watchers:
                 self.cov.want_hide(me, watchers, t, max_cost=100.0)
-            hide = self.cov.hide_xy()
+            hide = self.cov.hide_xy() if hide is not None or self.cov.hide is not None else None
+            if hit_now:
+                alt = self._shootable(me, enemies)
+                if alt is not None:
+                    # return fire while we go: it can see us anyway
+                    dec.target = Target.from_track(alt, t)
+                    intent.fire = "short"
             if hide is not None:
                 self.mv.go(hide, me, z, prefer_cover=False, tag="break", replan_dist=4.0)
             else:
@@ -386,6 +403,9 @@ class Tactics:
                 intent.fire = "long"
         else:
             self._reposition(me, obs, dec, watchers, slack)
+        # ---------------- counters to what beats cover and dodging
+        self._counter_laser(me, dec, lt, enemies)
+        self._counter_mortar(me, dec)
         # the zone comes first: with little slack left, every play walks toward safety
         cx, cy, rs = self.mv.safe_circle(z)
         if slack < 15.0 and math.hypot(me.pos[0] - cx, me.pos[1] - cy) > rs:
@@ -426,12 +446,15 @@ class Tactics:
                 self.cov.want_hide(me, watchers, t, max_cost=120.0)
                 hide = self.cov.hide_xy()
                 if hide is not None:
-                    self.mv.go(hide, me, z, prefer_cover=False, tag="open-hide", replan_dist=4.0)
-                    dec.speed = "boost" if me.energy > 30 else "walk"
-                    intent.label = "opening: hide"
-                    if self.mv.arrived(me):
-                        self.opening_done = True
-                    return
+                    if math.hypot(hide[0] - me.pos[0], hide[1] - me.pos[1]) > 3.0 and self.second_goal is None:
+                        self.mv.go(hide, me, z, prefer_cover=False, tag="open-hide", replan_dist=4.0)
+                        dec.speed = "boost" if me.energy > 30 else "walk"
+                        intent.label = "opening: hide"
+                        return
+                    # hidden: the hunter saw where we went; slip away quietly to a spot it did not see
+                    if self._opening_second(me, dec, watchers):
+                        return
+                    self.opening_done = True
             else:
                 if self.opening_search is None and self.opening_goal is None:
                     start = self.w.nearest_free(me.pos[0], me.pos[1], 6)
@@ -443,17 +466,14 @@ class Tactics:
                     self.opening_search = None
                 if self.opening_goal is not None:
                     there = math.hypot(self.opening_goal[0] - me.pos[0], self.opening_goal[1] - me.pos[1]) < 3.0
-                    if not there:
+                    self.first_reached = self.first_reached or there
+                    if not self.first_reached:
                         self.mv.go(self.opening_goal, me, z, prefer_cover=False, tag="open-cover")
                         dec.speed = "boost"
                         intent.label = "opening: cover"
                         return
-                    # in cover: stand still and watch for a few seconds (silent, nothing to see)
-                    if t < 12.0:
-                        self.mv.clear()
-                        dec.hold = True
-                        dec.face = self.lookout_yaw(me)
-                        intent.label = "opening: watch"
+                    # in cover: keep going, silently, to a second spot nobody saw us reach
+                    if self._opening_second(me, dec, watchers):
                         return
                     self.opening_done = True
                 intent.label = "opening: searching"
@@ -462,6 +482,13 @@ class Tactics:
         #    including the cubes a kill drops, before we move on
         near_active = [tr for tr in self.th.active_mechs(t, 6.0) if self._dist(me, tr) < 90.0]
         safe = not near_active and t - self.th.t_taken > 5.0 and not any(tr.sees_us for tr in self.th.mechs())
+        # after a fight, a third mech waits for the winner: unless nothing has been heard nearby,
+        # get out of sight and heal before collecting
+        noisy = any(not tr.dead and t - max(tr.t_seen, tr.t_heard) <= 10.0 for tr in self.th.mechs()) or \
+            any(t - c.t <= 10.0 and c.band != "far" for c in self.th.contacts)
+        after_fight = t - self.th.t_fight < 30.0
+        if after_fight and noisy and me.hp_frac < 0.93:
+            safe = False
         if safe and slack > 15.0:
             lc = self.loot_choice(me, obs)
             if lc is not None:
@@ -531,6 +558,104 @@ class Tactics:
             dec.face = self.lookout_yaw(me)
             dec.hold = True
 
+    def _opening_second(self, me, dec, watchers):
+        """After the first cover: walk at under 5 m/s (silent) to a cell hidden from the known threats
+        and from where we spawned, at least 25 m on. True while doing so."""
+        t = me.t
+        if t > 32.0:
+            return False
+        if self.second_goal is None:
+            if self.second_search is None:
+                eyes = list(watchers)
+                if self.spawn is not None:
+                    eyes.append((self.spawn[0], self.spawn[1], self.spawn[2] + 8.0))
+                start = self.w.nearest_free(me.pos[0], me.pos[1], 5)
+                if start is None or not eyes:
+                    return False
+                self.second_search = HideSearch(self.w, start, eyes, max_cost=90.0, max_expo=0.3,
+                                                away_from=(me.pos[0], me.pos[1]), min_dist=25.0,
+                                                height=me.height, rng=self.rng)
+            if not self.second_search.done:          # advanced by the brain inside the budget
+                dec.hold = True
+                dec.intent.label = "opening: watch"
+                return True
+            res = self.second_search.result
+            self.second_search = None
+            if res is None:
+                return False
+            self.second_goal = self.w.node_xy(res[0])
+        if math.hypot(self.second_goal[0] - me.pos[0], self.second_goal[1] - me.pos[1]) < 3.0:
+            return False
+        self.mv.go(self.second_goal, me, self.zone, prefer_cover=True, tag="open-second", replan_dist=4.0)
+        dec.speed = "silent"
+        dec.intent.label = "opening: second"
+        return True
+
+    # ------------------------------------------------------------------ counters
+    def _counter_laser(self, me, dec, lt, enemies):
+        """A visible enemy charging a laser at us: inside lightning range, short it; otherwise get
+        behind cover within the 0.75 s charge if a hidden cell is that close; otherwise jink."""
+        if lt is None:
+            return False
+        t = me.t
+        p = lt.est_pos(t)
+        d = math.hypot(p[0] - me.pos[0], p[1] - me.pos[1])
+        light = me.by_kind.get("lightning")
+        if light is not None and d <= light.stat("range", 45.0) * 0.95 and me.energy >= 6:
+            dec.target = Target.from_track(lt, t)
+            dec.intent.fire = "long"
+            dec.intent.label = "short its laser"
+            return True
+        hide = self.cov.hide_xy()
+        reach = me.walk * 0.75 + 1.0
+        if hide is not None and math.hypot(hide[0] - me.pos[0], hide[1] - me.pos[1]) <= reach:
+            self.mv.go(hide, me, self.zone, prefer_cover=False, tag="dodge-laser", replan_dist=2.0)
+            dec.speed = "boost" if me.energy > 10 else "walk"
+            dec.hold = False
+            dec.intent.label = "duck the laser"
+            return True
+        dec.evasive = True
+        dec.hold = False
+        dec.intent.label = (dec.intent.label or "") + " jink"
+        return True
+
+    def _counter_mortar(self, me, dec):
+        """A mortar launch heard while we stand still: the shell lands in 1-3 s with a 7 m blast.
+        Move 12+ m now, across the bearing it came from, to a cell we can walk to straight."""
+        t = me.t
+        mh = self.th.mortar_heard
+        if self.displace is not None:
+            goal, until = self.displace
+            if t < until and math.hypot(goal[0] - me.pos[0], goal[1] - me.pos[1]) > 1.5:
+                dec.direct = goal
+                dec.hold = False
+                dec.intent.label = "mortar: move"
+                return True
+            self.displace = None
+        if mh is None or t - mh[0] > 0.35 or me.speed() > 3.0 or not me.grounded:
+            return False
+        goal = self.displacement(me, mh[1])
+        if goal is None:
+            return False
+        self.displace = (goal, t + 2.5)
+        self.mv.clear()
+        dec.direct = goal
+        dec.hold = False
+        dec.intent.label = "mortar: move"
+        return True
+
+    def displacement(self, me, bearing_yaw, dist=13.0):
+        """A walkable point `dist` m away, preferring across the shell's bearing, then away from it."""
+        x, y = me.pos[0], me.pos[1]
+        side = 1 if self.rng.random() < 0.5 else -1
+        options = [bearing_yaw + side * math.pi / 2, bearing_yaw - side * math.pi / 2,
+                   bearing_yaw + math.pi + side * 0.6, bearing_yaw + math.pi - side * 0.6, bearing_yaw + math.pi]
+        for a in options:
+            gx, gy = x + math.cos(a) * dist, y + math.sin(a) * dist
+            if self.w.walkable(x, y, gx, gy, need=2.7, skip_start=1.0):
+                return (gx, gy)
+        return None
+
     # ------------------------------------------------------------------ the air
     def _air(self, me, obs, dec, play, target, calc, enemies, slack):
         """Start or continue an air play, and fight from a roof. True when it decides the legs."""
@@ -577,6 +702,9 @@ class Tactics:
         if self.roof_mode and on_roof:
             self.mv.allow_roof = True
             leave = slack < 20.0 and final_roof is None
+            # a mortar reaches a roof: do not stay up there with one in range
+            if any(e.has("mortar") and self._dist(me, e) <= 235.0 for e in enemies):
+                leave = True
             if target is not None and not leave:
                 tp = target.est_pos(t)
                 light = me.by_kind.get("lightning")

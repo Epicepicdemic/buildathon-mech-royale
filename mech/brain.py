@@ -6,6 +6,7 @@ Long searches are resumable, so no decision waits for one to finish.
 """
 import gc
 import math
+import random
 import sys
 import time
 
@@ -38,7 +39,7 @@ class Bot:
         self.zone = Zone(self.cfg)
         self.threats = Threats(self.cfg, self.world, self.slot)
         self.mover = Mover(self.world, self.cfg, self.seed)
-        self.cover = CoverState(self.world)
+        self.cover = CoverState(self.world, random.Random(self.seed ^ 0xC0E5))
         self.gunner = Gunner(self.cfg, self.world, self.seed)
         self.tactics = Tactics(self.world, self.cfg, self.mover, self.cover, self.threats, self.zone, self.seed)
         self.decisions = 0
@@ -65,9 +66,9 @@ class Bot:
             self.mover.work(me, self.zone, min(end, time.perf_counter() + 0.005))
         self.mover.work(me, self.zone, end - 0.0015)
         self.cover.run(end - 0.0005)
-        os_ = self.tactics.opening_search
-        if os_ is not None and not os_.done:
-            os_.run(end)
+        for srch in (self.tactics.opening_search, self.tactics.second_search):
+            if srch is not None and not srch.done and time.perf_counter() < end:
+                srch.run(end)
         # ---- legs: an air manoeuvre, a straight walk on a roof, or the mover
         laser = me.by_kind.get("laser")
         released = self.prev_charge > 0 and (laser is None or laser.charge == 0)

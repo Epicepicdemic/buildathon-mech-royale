@@ -98,3 +98,40 @@ class PopUpIntegrationTests(unittest.TestCase):
         self.assertTrue(started)
         self.assertTrue(jetted)
         self.assertTrue(charging)
+
+
+class GhostTargetTests(unittest.TestCase):
+    def test_shoots_the_visible_attacker_not_a_vanished_dying_target(self):
+        """A nearly dead enemy drops out of view as someone dies; another enemy is shooting us from
+        40 m. The bot must not chase the ghost."""
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.opening_done = True
+        me = (300.0, -60.0)
+        aim = [0.0, 0.0]
+        fired_at = set()
+        for k in range(20):
+            t = 50.0 + 0.1 * k
+            obs = self_obs(pos=(me[0], me[1], w.floor(*me)), t=t, aim=aim)
+            obs["zone"] = {"center": [41.3, -72.8], "radius": 560, "next_center": [300.0, -60.0], "next_radius": 380,
+                           "shrink_start": 60, "shrink_end": 110, "dps": 20}
+            attacker = {"id": 13, "kind": "mech", "pos": [340.0, -60.0, w.floor(340, -60)], "vel": [0, 0, 0],
+                        "aim": [math.pi, 0.0], "hp": 900, "max_hp": 1400, "cubes": 0, "weapons": ["gun"],
+                        "charging": False}
+            obs["mechs"] = [attacker]
+            obs["alive"] = 16
+            if k < 5:
+                obs["mechs"].append({"id": 6, "kind": "mech", "pos": [300.0, -10.0, w.floor(300, -10)],
+                                     "vel": [0, 0, 0], "aim": [0.0, 0.0], "hp": 60, "max_hp": 1400, "cubes": 0,
+                                     "weapons": ["gun"], "charging": False})
+            else:
+                obs["alive"] = 15
+            if k % 3 == 0:
+                obs["events"] = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 13}]
+            a = bot.act(obs)
+            aim = a["aim"]
+            if a["fire"][0] and k >= 6:
+                fired_at.add(round(math.degrees(aim[0])))
+        self.assertTrue(bot.threats.tracks[6].dead)
+        self.assertTrue(fired_at)
+        self.assertTrue(all(abs(d) < 10 for d in fired_at), fired_at)      # east, at the attacker

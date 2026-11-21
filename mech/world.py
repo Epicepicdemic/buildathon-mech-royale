@@ -34,7 +34,6 @@ class World:
         self.nfan = meta["nfan"]
         self.bounds = meta["bounds"]
         self.params = meta["params"]
-        self.strongpoints = meta["strongpoints"]     # [x, y, exposure, wall arc deg, exits]
         self.roofs = meta["roofs"]                   # [x, y, area, height, height above ground]
 
         def layer(name, code):
@@ -57,6 +56,7 @@ class World:
         self.roof_dm = layer("roof", "h")
         self.roof_id = layer("roof_id", "H")
         self.main = layer("main", None)       # 1 = node in the main walkable area
+        self.arc = layer("arc", None)         # share of directions with a hiding wall within 12 m (x255)
         nu = self.nu
         self.dirs = [tuple(d) for d in meta["dirs"]]
         self.offs = [dv * nu + du for du, dv in self.dirs]
@@ -190,14 +190,15 @@ class World:
                         return False
         return True
 
-    def sees(self, eye, feet, height=9.0, near_range=45.0):
+    def sees(self, eye, feet, height=9.0, near_range=45.0, step=1.0):
         """Can an eye at `eye` see a mech standing at `feet` (centre or top)? Buildings, terrain,
         and canopy beyond near_range block. Field of view is not considered here."""
         d = math.hypot(feet[0] - eye[0], feet[1] - eye[1])
         canopy = d > near_range
-        if self.line_clear(eye[0], eye[1], eye[2], feet[0], feet[1], feet[2] + height, canopy=canopy):
+        if self.line_clear(eye[0], eye[1], eye[2], feet[0], feet[1], feet[2] + height, step=step, canopy=canopy):
             return True
-        return self.line_clear(eye[0], eye[1], eye[2], feet[0], feet[1], feet[2] + height * 0.5, canopy=canopy)
+        return self.line_clear(eye[0], eye[1], eye[2], feet[0], feet[1], feet[2] + height * 0.5, step=step,
+                               canopy=canopy)
 
     def shot_clear(self, a, b):
         """A straight shot from a to b is not stopped by buildings or terrain (trees stop no shots)."""

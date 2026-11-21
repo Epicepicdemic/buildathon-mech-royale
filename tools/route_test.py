@@ -84,25 +84,16 @@ def validate_nodes(w, nodes, radius=2.5):
     return bad
 
 
-def pick_goal(w, field, start_xy, ph):
-    """The tactical goal: the best strongpoint inside the safe circle, else the nearest safe node."""
+def pick_goal(w, field, start_xy, ph, rng):
+    """The tactical goal: the bot's own hold choice inside the safe circle (no threats known)."""
+    from mech import positions
     cx, cy = ph["next_center"]
     rs = max(2.0, ph["next_radius"] - SAFE_MARGIN)
-    best = None
-    for sp in w.strongpoints:
-        x, y = sp[0], sp[1]
-        if math.hypot(x - cx, y - cy) <= rs - 4:
-            n = w.node(x, y)
-            if not w.main[n]:
-                continue
-            score = math.hypot(x - start_xy[0], y - start_xy[1]) + 300 * sp[2]
-            if best is None or score < best[0]:
-                best = (score, n)
-    if best:
-        return best[1]
+    n = positions.choose_hold(w, start_xy, (cx, cy, max(2.0, rs - 4.0)), [], rng)
+    if n is not None and w.main[n]:
+        return n
     n = w.nearest_free(start_xy[0], start_xy[1])
-    path = field.path(n)
-    return path[-1]
+    return field.path(n)[-1]
 
 
 def run(n_cases=500, seed=7828, sim=True, verbose=False):
@@ -149,7 +140,7 @@ def run(n_cases=500, seed=7828, sim=True, verbose=False):
         fast_d = nav.path_length(w, field.path(n0))
         stats["cases"] += 1
         feasible = now + mob.time_fast(fast_d * routing.PATH_FACTOR, energy) <= deadline
-        goal = pick_goal(w, field, (sx, sy), ph)
+        goal = pick_goal(w, field, (sx, sy), ph, rng)
         t0 = time.perf_counter()
         planner = routing.RoutePlanner(w, n0, goal, mob, energy, now, deadline, (ncx, ncy, rs), cover_mult=cover,
                                          zone_field=field)

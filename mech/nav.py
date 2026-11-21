@@ -229,7 +229,9 @@ class NearestSearch:
     """Resumable Dijkstra (walking distance) from `start` that stops at the first node for which
     `pred(n)` is true, within `max_cost` metres. `result` is (node, path) or None when not found."""
 
-    def __init__(self, world, start, pred, max_cost=80.0, mult=None):
+    def __init__(self, world, start, pred, max_cost=80.0, mult=None, alts=1, alt_slack=0.0, rng=None):
+        """With alts > 1, keep searching until `alts` matches or `alt_slack` metres beyond the first,
+        then draw one of them with `rng` (nearer ones more likely)."""
         self.w = world
         self.pred = pred
         self.max_cost = max_cost
@@ -240,6 +242,10 @@ class NearestSearch:
         self.done = False
         self.result = None
         self.checked = 0
+        self.alts = alts
+        self.alt_slack = alt_slack
+        self.rng = rng
+        self.found = []
 
     def run(self, deadline):
         if self.done:
@@ -258,16 +264,12 @@ class NearestSearch:
             if d > g.get(n, INF):
                 continue
             self.checked += 1
+            if self.found and d > self.found[0][0] + self.alt_slack:
+                return self._finish()
             if pred(n):
-                path = []
-                m = n
-                while m is not None:
-                    path.append(m)
-                    m = parent[m]
-                path.reverse()
-                self.result = (n, path)
-                self.done = True
-                return True
+                self.found.append((d, n))
+                if len(self.found) >= self.alts:
+                    return self._finish()
             if d <= self.max_cost:
                 for o, c in table[edges[n]]:
                     m = n + o
@@ -278,7 +280,32 @@ class NearestSearch:
                         push(heap, (nd, m))
             if (self.checked & 7) == 0 and clock() > deadline:
                 return False
+        return self._finish()
+
+    def _finish(self):
         self.done = True
+        self.pred = None            # drop the closure (it refers back to its owner)
+        if not self.found:
+            return True
+        if len(self.found) == 1 or self.rng is None:
+            n = self.found[0][1]
+        else:
+            d0 = self.found[0][0]
+            ws = [1.0 / (1.0 + (d - d0) / 6.0) for d, _ in self.found]
+            pick = self.rng.random() * sum(ws)
+            n = self.found[-1][1]
+            for w_, (d, m) in zip(ws, self.found):
+                pick -= w_
+                if pick <= 0:
+                    n = m
+                    break
+        path = []
+        m = n
+        while m is not None:
+            path.append(m)
+            m = self.parent[m]
+        path.reverse()
+        self.result = (n, path)
         return True
 
 

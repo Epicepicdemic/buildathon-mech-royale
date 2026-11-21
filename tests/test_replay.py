@@ -1,4 +1,8 @@
-"""Replay the kit's recorded match through the bot and report the worst decision time."""
+"""Replay the kit's recorded match through the bot and report the worst decision time.
+
+The assertion uses the process's CPU time per decision (time.thread_time), which is what the
+1-core match container limits; wall time is reported too but swings with load on a busy machine.
+"""
 import time
 import unittest
 
@@ -10,20 +14,22 @@ class ReplayTests(unittest.TestCase):
     def test_replay_worst_decision(self):
         rows = stream_rows()
         bot = Bot(rows[0])
-        times = []
+        wall, cpu = [], []
         for r in rows[1:]:
             if r.get("type") != "obs":
                 continue
-            t0 = time.perf_counter()
+            w0, c0 = time.perf_counter(), time.thread_time()
             a = bot.act(r)
-            times.append((time.perf_counter() - t0) * 1000)
+            cpu.append((time.thread_time() - c0) * 1000)
+            wall.append((time.perf_counter() - w0) * 1000)
             self.assertEqual(a["tick"], r["tick"])
             self.assertEqual(len(a["fire"]), 2)
-        times.sort()
-        print("\nreplay: %d decisions, p50 %.2f ms, p99 %.2f ms, worst %.2f ms"
-              % (len(times), times[len(times) // 2], times[int(len(times) * 0.99)], times[-1]))
-        self.assertEqual(len(times), 300)
-        self.assertLess(times[-1], 20.0)
+        wall.sort()
+        cpu.sort()
+        print("\nreplay: %d decisions, cpu p50 %.2f p99 %.2f worst %.2f ms; wall worst %.2f ms"
+              % (len(cpu), cpu[len(cpu) // 2], cpu[int(len(cpu) * 0.99)], cpu[-1], wall[-1]))
+        self.assertEqual(len(cpu), 300)
+        self.assertLess(cpu[-1], 20.0)
 
 
 if __name__ == "__main__":

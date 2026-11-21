@@ -143,6 +143,9 @@ class Threats:
         self.t_dealt = -1e9           # we last dealt damage
         self.t_taken = -1e9           # we last took (non-zone) damage
         self.t_zone_dmg = -1e9
+        self.mortar_heard = None      # (t, bearing, band) of the latest mortar launch heard
+        self.prev_in_obs = set()
+        self.t_fight = -1e9           # we last dealt or took weapon damage
 
     # ------------------------------------------------------------------ helpers
     def band_dist(self, kind, band):
@@ -241,7 +244,13 @@ class Threats:
             if self.alive is not None and alive < self.alive:
                 for _ in range(self.alive - alive):
                     self.deaths.append((t, "alive"))
+                # a nearly dead mech that vanished from view on the tick someone died is that someone
+                gone = [tr for tr in self.tracks.values() if tr.kind == "mech" and not tr.dead and not tr.in_obs
+                        and tr.id in self.prev_in_obs and (tr.hp_frac() < 0.35)]
+                for tr in gone[: self.alive - alive]:
+                    tr.dead = True
             self.alive = alive
+        self.prev_in_obs = set(seen_ids)
         # forget stale phantoms and old contacts
         for tid in list(self.tracks):
             tr = self.tracks[tid]
@@ -263,6 +272,8 @@ class Threats:
                     self.t_zone_dmg = t
                     continue
                 self.t_taken = t
+                if wpn != "npc":
+                    self.t_fight = t
                 self.dmg_taken.append((t, amt, wpn))
                 b = e.get("bearing")
                 self.last_damage = (t, b, by, wpn)
@@ -287,6 +298,8 @@ class Threats:
             elif et == "hit":
                 tgt = e.get("target")
                 self.t_dealt = t
+                if isinstance(tgt, (int, float)) and tgt < 100:
+                    self.t_fight = t
                 tr = self.tracks.get(tgt)
                 if tr is not None:
                     tr.t_we_hit = t
@@ -348,6 +361,8 @@ class Threats:
         t = me.t
         for s in obs.get("sounds") or []:
             kind = s.get("kind")
+            if kind == "mortar":
+                self.mortar_heard = (t - float(s.get("age", 0.0) or 0.0), float(s.get("bearing", 0.0)), s.get("dist"))
             if kind not in MECH_WEAPON_SOUNDS:
                 if kind == "death":
                     self.deaths.append((t, "sound"))

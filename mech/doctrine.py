@@ -238,6 +238,7 @@ class Intent:
         self.face = None            # yaw to hold the torso at when not shooting
         self.reload_ok = False      # a good moment to reload
         self.hold = False           # stand still
+        self.cover_near = True      # a hidden cell one step away (long bursts at range need it)
         self.label = play
 
 
@@ -260,6 +261,9 @@ class Assault:
         want = 38.0 if "lightning" in sit.me_weapons else 65.0
         if "laser" in sit.me_weapons and "lightning" not in sit.me_weapons:
             want = 90.0
+        if getattr(e, "has", lambda k: False)("mortar"):
+            # its blast throws us back and drains the energy lightning needs: stay at gun/laser range
+            want = max(want, 75.0)
         if dist > want:
             # approach: toward the rear side when it is not looking at us
             if not getattr(e, "sees_us", True):
@@ -430,13 +434,14 @@ def pick_target(sit_factory, enemies, t, me_pos):
         sit = sit_factory(e)
         calc = FightCalc(sit, e)
         score = calc.ratio
-        if getattr(e, "los", False):
-            score *= 1.3
+        visible = getattr(e, "los", False)
+        if not visible:
+            score *= 0.35            # a memory or a sound: anything we can actually shoot comes first
         if e.engaged_elsewhere(t) if hasattr(e, "engaged_elsewhere") else False:
             score *= 1.3
-        if getattr(e, "t_hit_us", -1e9) >= t - 3.0:
-            score *= 1.4
-        if calc.finishable:
+        if getattr(e, "t_hit_us", -1e9) >= t - 2.0:
+            score *= 2.0             # whoever is hitting us now
+        if calc.finishable and visible:
             score *= 1.6
         score /= 1.0 + calc.dist / 250.0
         if best is None or score > best[0]:
