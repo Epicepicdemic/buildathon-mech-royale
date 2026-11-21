@@ -19,11 +19,28 @@ INF = float("inf")
 class ZoneField:
     """Walking distance (metres) from every node to the nearest node inside a circle."""
 
-    def __init__(self, world, cx, cy, r):
+    def __init__(self, world, cx, cy, r, stay=None, outside_mult=5.0):
+        """`stay` = (cx, cy, r): the current zone. Walking outside it costs `outside_mult` times
+        more, so paths go around buildings on the inside of the circle when they can."""
         self.w = world
         self.cx, self.cy, self.r = cx, cy, r
         nu, nv = world.nu, world.nv
         self.dist = [INF] * (nu * nv)
+        self.om = outside_mult
+        self.inside = None
+        if stay is not None:
+            scx, scy, sr = stay
+            ins = bytearray(nu * nv)
+            for v in range(nv):
+                dy = world.y0 + v * world.res - scy
+                if abs(dy) > sr:
+                    continue
+                half = math.sqrt(sr * sr - dy * dy)
+                u0 = max(0, int(math.ceil((scx - half - world.x0) / world.res)))
+                u1 = min(nu - 1, int(math.floor((scx + half - world.x0) / world.res)))
+                if u0 <= u1:
+                    ins[v * nu + u0:v * nu + u1 + 1] = b"\x01" * (u1 - u0 + 1)
+            self.inside = ins
         self.heap = []
         self.done = False
         self.pops = 0
@@ -70,16 +87,26 @@ class ZoneField:
         pop, push = heapq.heappop, heapq.heappush
         clock = time.perf_counter
         count = 0
+        ins = self.inside
+        om = self.om
         while heap:
             d, n = pop(heap)
             if d > dist[n]:
                 continue
-            for o, c in table[edges[n]]:
-                m = n + o
-                nd = d + c
-                if nd < dist[m]:
-                    dist[m] = nd
-                    push(heap, (nd, m))
+            if ins is None:
+                for o, c in table[edges[n]]:
+                    m = n + o
+                    nd = d + c
+                    if nd < dist[m]:
+                        dist[m] = nd
+                        push(heap, (nd, m))
+            else:
+                for o, c in table[edges[n]]:
+                    m = n + o
+                    nd = d + (c if ins[m] else c * om)
+                    if nd < dist[m]:
+                        dist[m] = nd
+                        push(heap, (nd, m))
             count += 1
             if count & 255 == 0 and clock() > deadline:
                 self.pops += count
@@ -101,11 +128,12 @@ class ZoneField:
         if d0 == 0.0 or d0 == INF:
             return None
         best, bn = INF, None
+        ins = self.inside
         for o, c in self.w.nbr_table[self.w.edges[n]]:
             m = n + o
             dm = dist[m]
             if dm < d0:
-                v = dm + c
+                v = dm + (c if ins is None or ins[n] else c * self.om)
                 if v < best:
                     best, bn = v, m
         return bn
