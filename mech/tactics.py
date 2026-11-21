@@ -23,6 +23,16 @@ WANTED_WEAPONS = ("laser", "lightning")     # laser first (kills happen at range
 LOSE_S = 1.5            # squad_no_break: clearly losing this long before a break stands
 LOSE_NEAR_M = 160.0     # ... counting mechs this close
 ISOLATE_M = 24.0        # lose_isolate: a cell this close hidden from all shooters but the target
+RANGE_BAND = (105.0, 135.0)         # squad_range: with a laser (house guns land 15-35% here) ...
+RANGE_BAND_GUN = (95.0, 120.0)      # ... the gun alone ...
+RANGE_BAND_FINISH = (90.0, 115.0)   # ... a target under 35% HP
+RANGE_STEPS = (6.0, 12.0)           # candidate steps in 16 directions
+RANGE_EVERY_S = 0.2                 # re-score this often (and on every jink flip)
+RANGE_TAKEOVER_M = 40.0             # the kiter takes over from the approach this far past the band
+RANGE_LOS_EXTRA_M = 10.0            # the band's upper edge stretches this far (135 -> 145 m) in sight
+                                    # (HOUSE-BOTS.md: expert DPS 20 HP/s at 105-135 m, 12 at 135-150 m)
+RANGE_LIGHTNING_M = 70.0            # hard floor from any lightning holder (experts rush with it) ...
+RANGE_LIGHTNING_BOOST_M = 85.0      # ... boosting back once one is this close
 GEAR_UNTIL_S = 50.0     # gear_first (mech/profile.py): the opening pacing ends at this time ...
 GEAR_KILLS = 1          # ... or after more kills than this
 GEAR_NEAR_M = 180.0     # a second mech this close: fight (pacing stands aside meanwhile)
@@ -107,6 +117,10 @@ class Tactics:
         self.iso = CoverState(world, random.Random(seed + 7))   # lose_isolate: hidden from all but the target
         self.isolating = False
         self.prev_target_id = None      # sticky_target
+        self.range_goal = None          # squad_range
+        self.range_goal_t = -1e9
+        self.range_side = 1
+        self.range_flip_t = -1e9
         self.th = threats
         self.zone = zone
         self.loot = LootMemory(cfg)
@@ -214,6 +228,102 @@ class Tactics:
                 if t - self.iso.fail_t > 1.0:         # no such cell here: look again in a second
                     self.iso.want_hide(me, pts, t, max_cost=ISOLATE_M)
         return play
+
+    def _range_band(self, me, target):
+        if target.hp_frac() < 0.35:
+            lo, hi = RANGE_BAND_FINISH
+        elif me.has("laser"):
+            lo, hi = RANGE_BAND
+        else:
+            lo, hi = RANGE_BAND_GUN
+        if target.has("mortar"):
+            lo = max(lo, 95.0)          # outside its throw-back
+        if target.has("lightning"):
+            lo = max(lo, 70.0)
+        return lo, max(hi, lo + 20.0)
+
+    def _sees(self, gx, gy, p):
+        return self.w.line_clear(gx, gy, self.w.floor(gx, gy) + 8.0, p[0], p[1], p[2] + 6.0, step=2.0)
+
+    def _range_pick(self, me, target, tp, enemies):
+        """Score staying put and 6/12 m steps in 16 directions: the band to the target, -50 for each
+        other shooter that would see us there (isolation without breaking off), +45 for sight of
+        the target when a weapon is ready (-45 while the gun reloads and the laser cools), -200
+        outside the safe circle, and a sideways pull that flips every 0.5-1.1 s (the jink)."""
+        t = me.t
+        x, y = me.pos[0], me.pos[1]
+        lo, hi = self._range_band(me, target)
+        gun = me.by_kind.get("gun")
+        laser = me.by_kind.get("laser")
+        dry = gun is None or gun.reload > 0 or (gun.ammo is not None and gun.ammo == 0)
+        hide = dry and (laser is None or laser.cooldown > 0.3)
+        others = sorted((e for e in enemies if e is not target and not e.dead), key=lambda e: self._dist(me, e))[:2]
+        ops = [o.est_pos(t) for o in others if self._dist(me, o) <= 220.0]
+        zappers = [e.est_pos(t) for e in [target] + others if e.has("lightning")]
+        cx, cy, rs = self.mv.safe_circle(self.zone)
+        to_t = math.atan2(tp[1] - y, tp[0] - x)
+        best = None
+        cands = [(x, y, 0.0)]
+        for k in range(16):
+            a = 2.0 * math.pi * k / 16
+            for st in RANGE_STEPS:
+                cands.append((x + math.cos(a) * st, y + math.sin(a) * st, a))
+        for gx, gy, a in cands:
+            moving = gx != x or gy != y
+            if moving and not self.w.walkable(x, y, gx, gy, need=2.6, skip_start=1.0):
+                continue
+            dt = math.hypot(gx - tp[0], gy - tp[1])
+            sees_t = self._sees(gx, gy, tp)
+            top = hi + (RANGE_LOS_EXTRA_M if sees_t else 0.0)
+            sc = -(lo - dt) * 3.0 if dt < lo else (-(dt - top) * 1.5 if dt > top else 0.0)
+            for zp in zappers:
+                dz = math.hypot(gx - zp[0], gy - zp[1])
+                if dz < RANGE_LIGHTNING_M:
+                    sc -= 100.0 + (RANGE_LIGHTNING_M - dz) * 5.0
+            if math.hypot(gx - cx, gy - cy) > rs:
+                sc -= 200.0
+            sc += (-45.0 if sees_t else 0.0) if hide else (45.0 if sees_t else 0.0)
+            for op in ops:
+                if self._sees(gx, gy, op):
+                    sc -= 50.0
+            if moving:
+                sc += 12.0 * math.sin(a - to_t) * self.range_side
+            if best is None or sc > best[0]:
+                best = (sc, (gx, gy) if moving else None)
+        return best[1] if best else None
+
+    def _range_keep(self, me, dec, target, enemies, intent):
+        """squad_range (round table 12, Neon): the house bots do not dodge and their guns fall from
+        76-90% inside 45 m to 15-35% at 78-150 m, while ours keeps landing on them; so in squad
+        mode hold 105-135 m and fire continuously instead of peeking from corners or walking to
+        57 m. Counter (backing into the zone or a second hunter): -200 outside the safe circle and
+        -50 for each other shooter's sight in the scoring; the zone override still applies."""
+        t = me.t
+        z = self.zone
+        tp = target.est_pos(t)
+        if t >= self.range_flip_t:
+            self.range_side = -self.range_side
+            self.range_flip_t = t + self.rng.uniform(0.5, 1.1)
+            self.range_goal_t = -1e9
+        if t - self.range_goal_t >= RANGE_EVERY_S:
+            self.range_goal = self._range_pick(me, target, tp, enemies)
+            self.range_goal_t = t
+        d = math.hypot(tp[0] - me.pos[0], tp[1] - me.pos[1])
+        lo, hi = self._range_band(me, target)
+        if self.range_goal is not None:
+            self._go_instant_or_plan(self.range_goal, me, z, "range")
+        else:
+            self.mv.clear()
+        zap_near = any(e.has("lightning") and not e.dead and self._dist(me, e) < RANGE_LIGHTNING_BOOST_M
+                       for e in enemies)
+        back_out = d < lo - 15.0 or zap_near
+        dec.speed = "boost" if back_out and me.energy > 30.0 else "walk"
+        dec.evasive = False
+        intent.fire = "long"
+        intent.spot = "strafe"
+        intent.no_laser_start = back_out              # backing out fast: the gun alone
+        intent.reload_ok = me.by_kind.get("gun") is not None and me.by_kind["gun"].ammo == 0
+        intent.label = "range %d" % d
 
     def _geared(self, me):
         return me.cubes >= 10 or (me.has("laser") and me.cubes >= GEAR_CUBES)
@@ -727,6 +837,9 @@ class Tactics:
             iso = None
         if gear is not None:
             self._gear(me, obs, dec, gear, slack)
+        elif squad and PF.on("squad_range") and play in (D.CORNER, D.ASSAULT) and target is not None \
+                and iso is None and self._dist(me, target) <= self._range_band(me, target)[1] + RANGE_TAKEOVER_M:
+            self._range_keep(me, dec, target, enemies, intent)
         elif iso is not None:
             # lose_isolate: boost to the cell only the target sees, the gun firing on the way
             self.mv.go(iso, me, z, prefer_cover=False, tag="isolate", replan_dist=2.5)
@@ -1188,7 +1301,9 @@ class Tactics:
         laser = me.by_kind.get("laser")
         if laser is not None and t >= self.th.short_until and target is not None \
                 and play in (D.ASSAULT, D.CORNER, D.HARASS) and not target.los \
-                and not any(e.sees_us for e in enemies) and laser.cooldown <= 0.1 and t - target.t_seen < 3.0:
+                and not any(e.sees_us for e in enemies) and laser.cooldown <= 0.1 and t - target.t_seen < 3.0 \
+                and not (self.mode.squad() and PF.on("squad_range")):
+            # (squad_range stays grounded: experts land 6.6 points more gun hits on airborne mechs)
             tp = target.est_pos(t)
             d = math.hypot(tp[0] - me.pos[0], tp[1] - me.pos[1])
             if 40.0 <= d <= laser.stat("range", 280.0) * 0.9:

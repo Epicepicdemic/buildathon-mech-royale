@@ -578,6 +578,76 @@ class HouseBotTests(unittest.TestCase):
         fresh = D.FightCalc(self.sit(e, False), e).their_dps_on_us
         e.t_reload_heard = 99.5
         self.assertLess(D.FightCalc(self.sit(e, False), e).their_dps_on_us, fresh * 0.5)
+class RangeKeepTests(unittest.TestCase):
+    """Round table 12, candidate C (brainstorm/r12/mech-neon.md): in squad mode CornerFight and
+    the 57 m Assault give way to range keeping at 105-135 m with continuous fire."""
+
+    def run_range(self, d, squad=True, n=8, hp=1400):
+        w = world()
+        bot = Bot(hello(), world=w)
+        if squad:
+            bot.tactics.mode.mode = "squad"
+            bot.tactics.gear_done = True
+        else:
+            bot.tactics.mode.locked = True
+        labels, fires, dists = [], [], []
+        for k in range(n):
+            obs = zone_obs(self_obs(pos=(ME[0], ME[1], w.floor(*ME)), t=100.0 + 0.1 * k))
+            e = enemy(9, ME[0] + d, ME[1], w, math.pi, weapons=("gun",))
+            e["hp"] = hp
+            obs["mechs"] = [e]
+            act = bot.act(obs)
+            labels.append(bot.last_label or "")
+            fires.append(bool(act["fire"][0]))
+            g = bot.tactics.range_goal
+            dists.append(None if g is None else math.hypot(g[0] - (ME[0] + d), g[1] - ME[1]))
+        return bot, labels, fires, dists
+
+    def test_inside_the_band_it_backs_out_and_keeps_firing(self):
+        bot, labels, fires, dists = self.run_range(70.0)
+        self.assertTrue(all(l.startswith("S range") for l in labels), labels)
+        self.assertTrue(any(fires))
+        self.assertTrue(all(x is not None and x > 70.0 for x in dists), dists)   # every step opens the range
+
+    def test_never_in_a_free_for_all(self):
+        bot, labels, _, _ = self.run_range(70.0, squad=False)
+        self.assertFalse(any("range" in l for l in labels), labels)
+
+    def test_far_targets_are_approached_by_the_ordinary_play(self):
+        bot, labels, _, _ = self.run_range(200.0)
+        self.assertFalse(any("range" in l for l in labels), labels)
+
+    def test_switch_off_restores_the_corner_and_assault(self):
+        with switch("squad_range", False):
+            bot, labels, _, _ = self.run_range(70.0)
+        self.assertFalse(any("range" in l for l in labels), labels)
+
+    def test_hard_70_m_floor_from_a_lightning_rusher(self):
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.mode.mode = "squad"
+        bot.tactics.gear_done = True
+        z = (ME[0] + 60.0, ME[1] + 10.0)
+        for k in range(6):
+            obs = zone_obs(self_obs(pos=(ME[0], ME[1], w.floor(*ME)), t=100.0 + 0.1 * k))
+            e = enemy(9, ME[0] + 110.0, ME[1], w, math.pi, weapons=("gun",))
+            e["hp"] = 400
+            zap = enemy(10, z[0], z[1], w, math.atan2(-10.0, -60.0), weapons=("gun", "lightning"))
+            obs["mechs"] = [e, zap]
+            act = bot.act(obs)
+        g = bot.tactics.range_goal
+        self.assertIn("range", bot.last_label or "")
+        self.assertIsNotNone(g)
+        self.assertGreater(math.hypot(g[0] - z[0], g[1] - z[1]), math.hypot(ME[0] - z[0], ME[1] - z[1]) + 5.0)
+        self.assertTrue(act["boost"])
+
+    def test_band_for_a_weak_target_and_mortar(self):
+        bot = Bot(hello(), world=world())
+        me = N(has=lambda k: k == "laser")
+        weak = N(hp_frac=lambda: 0.3, has=lambda k: False)
+        mortar = N(hp_frac=lambda: 0.3, has=lambda k: k == "mortar")
+        self.assertEqual(bot.tactics._range_band(me, weak), (90.0, 115.0))
+        self.assertEqual(bot.tactics._range_band(me, mortar), (95.0, 115.0))
 
 
 if __name__ == "__main__":

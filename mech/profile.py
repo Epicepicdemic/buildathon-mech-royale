@@ -17,6 +17,10 @@ modes. Pieces switched off here are kept for the next candidates (round table 12
                        x2.2 (x3.0 under 35% HP); in a free-for-all not with two shooters in sight
     airborne_aim       a mech 0.45 m off the ground: no dodge discount in FightCalc, gravity in
                        the gun's lead, long bursts to 165 m (R12 B, Carbon)
+    squad_range        squad mode: CornerFight and the 57 m Assault give way to range keeping at
+                       105-135 m, to 145 m while in sight (95-120 m gun only, 90-115 m on a target
+                       under 35% HP), a hard 70 m floor from any lightning holder, continuous fire,
+                       16-direction kiting, and no laser pop-ups (R12 C, Neon; HOUSE-BOTS.md)
     gun_during_charge  keep the gun firing while the laser charges, the torso on the laser's line:
                        only when the gun's lead is within 0.12 rad of it (both modes)
     partial_release    release the laser early when its partial charge already kills (both modes)
@@ -41,6 +45,7 @@ PROFILE = {
     "lose_isolate": True,
     "sticky_target": True,
     "airborne_aim": True,
+    "squad_range": True,
     "gun_during_charge": True,
     "partial_release": True,
     "finish_close": False,
