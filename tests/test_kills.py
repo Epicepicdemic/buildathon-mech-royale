@@ -187,3 +187,60 @@ class FarmTests(unittest.TestCase):
         bot, acts = self.crate_run(crate, mechs=[foe])
         labels = [a.get("debug", {}).get("label", "") for a in acts]
         self.assertFalse(any(l.startswith("farm") for l in labels), labels)
+
+
+class AggressionTests(unittest.TestCase):
+    """Item 5: aggression scales with how much fighting we hear (hunt when quiet, third-party
+    when chaotic). The same rule in every match."""
+
+    def quiet_bot(self):
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.opening_done = True
+        return w, bot
+
+    def test_chaos_counts_other_peoples_fighting(self):
+        from mech.state import Me
+        w, bot = self.quiet_bot()
+        me = (300.0, -60.0)
+        for k in range(10):
+            obs = zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=100.0 + k))
+            obs["sounds"] = [{"kind": "gun", "bearing": 2.0, "dist": "mid", "age": 0.1}]
+            if k == 5:
+                obs["sounds"].append({"kind": "death", "bearing": 2.0, "dist": "far", "age": 0.1})
+            bot.act(obs)
+        m = Me(zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=109.1)), bot.cfg)
+        self.assertGreater(bot.tactics.chaos(m), 0.9)            # 10 s of gunfire + a death
+        quiet = Me(zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=140.0)), bot.cfg)
+        self.assertEqual(bot.tactics.chaos(quiet), 0.0)          # forgotten after 20 s
+
+    def test_hunts_when_quiet(self):
+        w, bot = self.quiet_bot()
+        me = (300.0, -60.0)
+        # a mech seen at 100 s, 220 m away, gone from view; then 20 s of silence
+        obs = zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=100.0))
+        obs["mechs"] = [enemy(9, 300.0, 160.0, w, 0.0)]
+        bot.act(obs)
+        labels = []
+        for k in range(12):
+            obs = zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=120.0 + 0.1 * k))
+            bot.act(obs)
+            labels.append(bot.last_label)
+        self.assertTrue(any(l.startswith("hunt") for l in labels), labels)
+        goal = bot.mover.goal if bot.mover.goal is not None else bot.mover.plan_goal
+        self.assertIsNotNone(goal)
+        self.assertGreater(goal[1], me[1] + 60.0)                # toward it, stopping short
+
+    def test_third_party_when_chaotic(self):
+        w, bot = self.quiet_bot()
+        me = (300.0, -60.0)
+        labels = []
+        for k in range(14):
+            obs = zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=120.0 + 0.6 * k))
+            obs["sounds"] = [{"kind": "gun", "bearing": math.pi / 2, "dist": "mid", "age": 0.1},
+                             {"kind": "laser", "bearing": math.pi / 2 + 0.1, "dist": "mid", "age": 0.2}]
+            if k == 3:
+                obs["sounds"].append({"kind": "death", "bearing": math.pi / 2, "dist": "mid", "age": 0.1})
+            bot.act(obs)
+            labels.append(bot.last_label)
+        self.assertTrue(any(l.startswith("third party") for l in labels), labels)

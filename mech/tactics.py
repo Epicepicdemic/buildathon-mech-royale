@@ -288,12 +288,92 @@ class Tactics:
         self.loot_note = "kill drop"
         return True
 
+    # ------------------------------------------------------------------ aggression from what we hear
+    def chaos(self, me):
+        """How much fighting we hear, 0 (quiet) to 1 (chaotic): distinct seconds in the last 20 s
+        with a gun, laser, lightning or mortar sound, not counting seconds when we fired or were
+        hit, plus three for each death heard; 12 is chaotic. Ordinary adaptation to what the
+        observations say, the same in every match."""
+        t = me.t
+        th = self.th
+        bins = set()
+        deaths = 0
+        for ts, kind, b, band in th.fight_sounds:
+            if t - ts > 20.0:
+                continue
+            if kind == "death":
+                deaths += 1
+                continue
+            if abs(ts - th.t_dealt) < 1.0 or abs(ts - th.t_taken) < 1.0:
+                continue
+            bins.add(int(ts))
+        return min(1.0, (len(bins) + 3 * deaths) / 12.0)
+
+    def aggression(self, me):
+        """1 when the match is quiet (go and find someone), 0 when it is chaotic (let them fight,
+        take the survivor)."""
+        return 1.0 - self.chaos(me)
+
+    def _hunt_or_third_party(self, me, dec, slack):
+        """With nothing to do: when quiet, hunt (head for the nearest mech we know of or heard,
+        stopping 80 m short, so fights start on our terms); when chaotic, go toward the fighting
+        we hear (not our own) and stop about 100 m off, where a mech busy with someone else can be
+        picked off (the doctrine starts that fight: `_worth_starting`, engaged elsewhere)."""
+        t = me.t
+        z = self.zone
+        if t < OPENING_S or slack < 30.0 or me.hp_frac < 0.7:
+            return False
+        a = self.aggression(me)
+        cx, cy, rs = self.mv.safe_circle(z)
+        if a >= 0.6:
+            pts = []
+            for tr in self.th.mechs():
+                if tr.dead or t - max(tr.t_seen, tr.t_heard) > 30.0:
+                    continue
+                pts.append(tr.est_pos(t)[:2])
+            for c in self.th.contacts:
+                if t - c.t <= 15.0:
+                    pts.append(c.pos)
+            stop, label = 80.0, "hunt"
+        elif a <= 0.4:
+            pts = []
+            for ts, kind, b, band in self.th.fight_sounds:
+                if t - ts <= 8.0 and kind in ("gun", "laser", "lightning", "mortar", "explosion") and band != "near" \
+                        and not (abs(ts - self.th.t_dealt) < 1.0 or abs(ts - self.th.t_taken) < 1.0):
+                    # mid is 60-160 m, far beyond: close in until we can see who is fighting
+                    d = 140.0 if band == "mid" else 220.0
+                    pts.append((me.pos[0] + math.cos(b) * d, me.pos[1] + math.sin(b) * d))
+            stop, label = 100.0, "third party"
+        else:
+            return False
+        best = None
+        for p in pts:
+            d = math.hypot(p[0] - me.pos[0], p[1] - me.pos[1])
+            if d > 320.0 or math.hypot(p[0] - cx, p[1] - cy) > rs + 40.0:
+                continue
+            if best is None or d < best[0]:
+                best = (d, p)
+        if best is None or best[0] <= stop + 10.0:
+            return False
+        d, p = best
+        f = (d - stop) / d
+        goal = (me.pos[0] + (p[0] - me.pos[0]) * f, me.pos[1] + (p[1] - me.pos[1]) * f)
+        if math.hypot(goal[0] - cx, goal[1] - cy) > rs:
+            k = rs / max(1e-6, math.hypot(goal[0] - cx, goal[1] - cy))
+            goal = (cx + (goal[0] - cx) * k, cy + (goal[1] - cy) * k)
+        self.mv.go(goal, me, z, prefer_cover=True, tag=label, replan_dist=12.0)
+        dec.speed = "walk"
+        dec.intent.label = "%s (%.1f)" % (label, a)
+        dec.face = bearing(me.pos, p)
+        return True
+
     def _worth_starting(self, me, e, enemies):
         if not e.in_obs:
             return False
         d = self._dist(me, e)
-        # close by with nobody else watching us (behind a wall is fine: corners and pop-ups)
-        if d <= 90.0 and not any(o.sees_us for o in enemies if o is not e):
+        # close by with nobody else watching us (behind a wall is fine: corners and pop-ups); how
+        # far "close" reaches grows with how quiet the match is (90 m chaotic, 170 m quiet)
+        if d <= 90.0 + 80.0 * self.aggression(me) and not any(o.sees_us for o in enemies if o is not e):
             return True
         if not e.shootable():
             return False
@@ -1018,6 +1098,9 @@ class Tactics:
                 self.mv.go(drop, me, z, prefer_cover=False, tag="supply", replan_dist=3.0)
                 dec.speed = "walk"
                 return
+        # 5b. nothing to do: hunt when the match is quiet, third-party when it is loud
+        if self._hunt_or_third_party(me, dec, slack):
+            return
         # 6. hold a strongpoint in the next circle
         goal = self.hold_spot(me)
         self.mv.go(goal, me, z, prefer_cover=True, tag="hold")

@@ -11,6 +11,7 @@ import math
 from .geom import wrap, angdiff
 
 MECH_WEAPON_SOUNDS = ("gun", "mortar", "laser", "laser_charge", "lightning", "reload", "step", "boost", "jet")
+FIGHT_SOUNDS = ("gun", "laser", "lightning", "mortar", "explosion", "death")
 
 
 class Track:
@@ -160,6 +161,7 @@ class Threats:
         self.prev_in_obs = set()
         self.t_fight = -1e9           # we last dealt or took weapon damage
         self.last_kill_pos = None     # where the last mech we killed was
+        self.fight_sounds = []        # (t, kind, bearing, band) of every fight sound heard
 
     # ------------------------------------------------------------------ helpers
     def band_dist(self, kind, band):
@@ -283,6 +285,8 @@ class Threats:
             elif tr.kind == "npc" and t - tr.t_seen > 60.0:
                 del self.tracks[tid]
         self.contacts = [c for c in self.contacts if t - c.t <= 8.0]
+        if self.fight_sounds and t - self.fight_sounds[0][0] > 30.0:
+            self.fight_sounds = [f for f in self.fight_sounds if t - f[0] <= 30.0]
 
     def _events(self, obs, me):
         t = me.t
@@ -388,6 +392,9 @@ class Threats:
         t = me.t
         for s in obs.get("sounds") or []:
             kind = s.get("kind")
+            if kind in FIGHT_SOUNDS:
+                self.fight_sounds.append((t - float(s.get("age", 0.0) or 0.0), kind, float(s.get("bearing", 0.0)),
+                                          s.get("dist", "mid")))
             if kind == "mortar":
                 self.mortar_heard = (t - float(s.get("age", 0.0) or 0.0), float(s.get("bearing", 0.0)), s.get("dist"))
             if kind not in MECH_WEAPON_SOUNDS:
