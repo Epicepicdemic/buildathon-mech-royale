@@ -93,7 +93,7 @@ class RoutePlanner:
     """
 
     def __init__(self, world, start, goal, mobility, energy, now, deadline, safe, cover_mult=None,
-                 prefer_cover=True, zone_field=None):
+                 prefer_cover=True, zone_field=None, stay=None):
         self.w = world
         self.start, self.goal = start, goal
         self.mob = mobility
@@ -114,7 +114,8 @@ class RoutePlanner:
                 self.result = self._zone_route(boost=True)
                 self.note = "zone path (late)"
                 return
-        self.search = nav.AStar(world, start, goal)
+        self.stay = stay
+        self.search = nav.AStar(world, start, goal, stay=stay)
 
     def _walk_ok(self, enter_len):
         if enter_len == INF:
@@ -161,7 +162,7 @@ class RoutePlanner:
                     self.note = "fast"
                     return True
                 self.stage = "cover"
-                self.search = nav.AStar(self.w, self.start, self.goal, mult=self.cover_mult)
+                self.search = nav.AStar(self.w, self.start, self.goal, mult=self.cover_mult, stay=self.stay)
             else:
                 fn, FL, fe = self.fast
                 if nodes:

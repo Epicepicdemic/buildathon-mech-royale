@@ -152,10 +152,14 @@ class AStar:
     """Resumable A* from start to goal over walkable nodes. `mult[n]` (optional) scales the cost
     of entering n; it must be >= 1 so the straight-line heuristic stays admissible."""
 
-    def __init__(self, world, start, goal, mult=None, max_pops=200000):
+    def __init__(self, world, start, goal, mult=None, max_pops=200000, stay=None, outside_mult=5.0):
+        """`stay` = (cx, cy, r): entering a node outside this circle (the current zone) costs
+        `outside_mult` times more, so routes go round buildings on the inside of the circle."""
         self.w = world
         self.start, self.goal = start, goal
         self.mult = mult
+        self.stay = stay
+        self.om = outside_mult
         self.max_pops = max_pops
         gv, gu = divmod(goal, world.nu)
         self.gu, self.gv = gu, gv
@@ -187,6 +191,13 @@ class AStar:
         pop, push = heapq.heappop, heapq.heappush
         clock = time.perf_counter
         count = 0
+        stay = self.stay
+        if stay is not None:
+            # in grid units relative to the grid origin
+            scu = (stay[0] - self.w.x0) / res
+            scv = (stay[1] - self.w.y0) / res
+            sr2 = (stay[2] / res) ** 2
+            om = self.om
         while heap:
             f, d, n = pop(heap)
             if d > g.get(n, INF):
@@ -203,6 +214,10 @@ class AStar:
             for o, c in table[edges[n]]:
                 m = n + o
                 nd = d + (c * mult[m] if mult is not None else c)
+                if stay is not None:
+                    v, u = divmod(m, nu)
+                    if (u - scu) ** 2 + (v - scv) ** 2 > sr2:
+                        nd += (nd - d) * (om - 1.0)
                 if nd < g.get(m, INF):
                     g[m] = nd
                     parent[m] = n

@@ -130,9 +130,11 @@ class Mover:
             return
         self.plan_goal = goal
         self.plan_tag = tag
+        cx, cy, r = zone.circle_at(me.t + 8.0)
         self.planner = routing.RoutePlanner(self.w, start, gn, self.mob, me.energy, me.t, zone.deadline(),
                                             self.safe_circle(zone), self.cover_mult, prefer_cover,
-                                            zone_field=self.zf if self.field_ready() else None)
+                                            zone_field=self.zf if self.field_ready() else None,
+                                            stay=(cx, cy, max(1.0, r - 3.0)))
         self.last_plan_t = me.t
 
     def go_path(self, nodes, tag):

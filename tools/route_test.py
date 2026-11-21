@@ -143,7 +143,7 @@ def run(n_cases=500, seed=7828, sim=True, verbose=False):
         goal = pick_goal(w, field, (sx, sy), ph, rng)
         t0 = time.perf_counter()
         planner = routing.RoutePlanner(w, n0, goal, mob, energy, now, deadline, (ncx, ncy, rs), cover_mult=cover,
-                                         zone_field=field)
+                                         zone_field=field, stay=(cx, cy, max(1.0, r - 3.0)))
         planner.run(1e18)
         ms = (time.perf_counter() - t0) * 1000
         stats["plan_ms_max"] = max(stats["plan_ms_max"], ms)
