@@ -142,3 +142,48 @@ class LoadoutTests(unittest.TestCase):
             aim = a["aim"]
             fired = fired or a["fire"][1] or a["fire"][0]
         self.assertTrue(fired)
+
+
+class FarmTests(unittest.TestCase):
+    """Item 4: drones and crates for cubes whenever no threat is near."""
+
+    def crate_run(self, crates_fn, mechs=(), hp=1000, n=12, sounds=True):
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.opening_done = True
+        me = (300.0, -60.0)
+        aim = [0.0, 0.0]
+        acts = []
+        for k in range(n):
+            obs = zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=200.0 + 0.1 * k, aim=aim, hp=hp))
+            obs["crates"] = crates_fn(k, w)
+            obs["mechs"] = list(mechs)
+            if sounds and k == 0:
+                obs["sounds"] = [{"kind": "gun", "bearing": 2.5, "dist": "far", "age": 0.1}]
+            a = bot.act(obs)
+            aim = a["aim"]
+            acts.append(a)
+        return bot, acts
+
+    def test_shoots_a_crate_in_view_while_hurt_with_far_gunfire(self):
+        """Version 3 healed (HP under 93%) and needed silence on every sound before shooting one."""
+        crate = lambda k, w: [{"id": 1001, "pos": [340.0, -60.0, w.floor(340.0, -60.0)], "hp": 300}]
+        bot, acts = self.crate_run(crate)
+        labels = [a.get("debug", {}).get("label", "") for a in acts]
+        self.assertTrue(any(l.startswith("farm: shoot crate") for l in labels), labels)
+        self.assertTrue(any(a["fire"][0] for a in acts))
+
+    def test_walks_to_a_crate_it_remembers(self):
+        crate = lambda k, w: ([{"id": 1002, "pos": [300.0, 40.0, w.floor(300.0, 40.0)], "hp": 300}] if k == 0 else [])
+        bot, acts = self.crate_run(crate, sounds=False)
+        self.assertIn(1002, bot.tactics.crate_mem)
+        labels = [a.get("debug", {}).get("label", "") for a in acts]
+        self.assertTrue(any(l.startswith("farm") for l in labels), labels)
+
+    def test_no_farming_with_an_enemy_in_view(self):
+        w = world()
+        crate = lambda k, w: [{"id": 1001, "pos": [340.0, -60.0, w.floor(340.0, -60.0)], "hp": 300}]
+        foe = enemy(9, 300.0, 40.0, w, 0.0)                      # 100 m north, looking away
+        bot, acts = self.crate_run(crate, mechs=[foe])
+        labels = [a.get("debug", {}).get("label", "") for a in acts]
+        self.assertFalse(any(l.startswith("farm") for l in labels), labels)

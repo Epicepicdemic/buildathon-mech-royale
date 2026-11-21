@@ -76,6 +76,7 @@ class Tactics:
         self.play_others = 0
         self.play_target = None
         self.kill_site = None        # (x, y, z, t) where our last kill fell
+        self.crate_mem = {}          # crate id -> ((x, y, z), t seen)
         self.iso = None              # (node, path) hidden from all attackers but one
         self.iso_search = None
         self.iso_key = None
@@ -449,10 +450,12 @@ class Tactics:
         return None
 
     def shoot_choice(self, me, obs, quiet):
-        """A crate or NPC drone worth shooting now, as a Target (or None)."""
+        """A crate or NPC drone worth shooting now, as a Target (or None). `quiet`: no threat near
+        (the caller decides; version 2 required silence on every sound and stopped at 300 s)."""
         t = me.t
         gun = me.by_kind.get("gun")
         light = me.by_kind.get("lightning")
+        laser = me.by_kind.get("laser")
         best = None
         if not quiet:
             return None
@@ -461,7 +464,8 @@ class Tactics:
             if self.crate_ban.get(c["id"], -1e9) > t:
                 continue
             d = math.hypot(cp[0] - me.pos[0], cp[1] - me.pos[1])
-            if d > 70 or (gun is None and (light is None or d > 40)):
+            reach = 80.0 if (gun is not None or laser is not None) else (40.0 if light is not None else 0.0)
+            if d > reach:
                 continue
             tg = Target(c["id"], "crate", (cp[0], cp[1], cp[2]), (0.0, 0.0, 0.0), 1.4, 2.4, True)
             if not self.w.shot_clear(me.muzzle, tg.center()):
@@ -469,7 +473,7 @@ class Tactics:
                 continue
             if best is None or d < best[0]:
                 best = (d, tg)
-        if best is None and me.hp_frac >= 0.7 and gun is not None:
+        if best is None and me.hp_frac >= 0.55 and (gun is not None or laser is not None):
             for tr in self.th.npcs():
                 if not tr.shootable():
                     continue
@@ -483,6 +487,83 @@ class Tactics:
                 if best is None or d + 40 < best[0]:
                     best = (d + 40, tg)
         return best[1] if best else None
+
+    # ------------------------------------------------------------------ farming
+    def _remember_crates(self, me, obs):
+        """Crates are listed only while seen: remember where they were until we see the spot empty."""
+        t = me.t
+        listed = set()
+        for c in obs.get("crates") or []:
+            if (c.get("hp") or 0) > 0:
+                self.crate_mem[c["id"]] = (tuple(c["pos"]), t)
+                listed.add(c["id"])
+        eye = me.eye
+        for cid, (cp, ts) in list(self.crate_mem.items()):
+            if cid in listed:
+                continue
+            d = math.hypot(cp[0] - me.pos[0], cp[1] - me.pos[1])
+            if t - ts > 240.0 or (d < 40.0 and self.w.line_clear(eye[0], eye[1], eye[2], cp[0], cp[1], cp[2] + 1.0)):
+                del self.crate_mem[cid]
+
+    def _no_threat_near(self, me):
+        """Nothing shooting at us, no hit in 5 s, no mech in view or heard lately within 150 m."""
+        t = me.t
+        if self.shooters(me) or t - self.th.t_taken < 5.0:
+            return False
+        for e in self.th.active_mechs(t, 6.0):
+            if self._dist(me, e) < 150.0 and (e.in_obs or t - e.t_heard < 4.0 or t - e.t_seen < 4.0):
+                return False
+        return True
+
+    def _farm(self, me, obs, dec, slack):
+        """Drones (2 cubes each) and crates (1 cube, half the time a weapon) when no threat is near,
+        all match long while the circle is still roomy: cubes are 4% HP and damage each."""
+        t = me.t
+        z = self.zone
+        intent = dec.intent
+        if slack < 20.0 or me.hp_frac < 0.55 or z.next_radius < 60.0 or not self._no_threat_near(me):
+            return False
+        sc = self.shoot_choice(me, obs, True)
+        if sc is not None:
+            self.loot_note = "shoot %s" % sc.kind
+            dec.target = sc
+            intent.fire = "long"
+            intent.label = "farm: shoot %s" % sc.kind
+            self.mv.clear()
+            if sc.kind == "npc":
+                d = math.hypot(sc.pos[0] - me.pos[0], sc.pos[1] - me.pos[1])
+                if d < 50 and sc.track is not None and not sc.track.aggro:
+                    self.mv.go(self.hold_spot(me), me, z, tag="hold")
+                dec.evasive = sc.track is not None and sc.track.aggro
+            return True
+        # nothing in view: walk to the nearest crate we remember, or a drone's patch, inside the circle
+        cx, cy, rs = self.mv.safe_circle(z)
+        best = None
+        for cid, (cp, ts) in self.crate_mem.items():
+            if self.crate_ban.get(cid, -1e9) > t or math.hypot(cp[0] - cx, cp[1] - cy) > rs:
+                continue
+            if abs(cp[2] - me.pos[2]) > 6.0:
+                continue                      # roof crates: not worth the climb in view
+            d = math.hypot(cp[0] - me.pos[0], cp[1] - me.pos[1])
+            if d <= 150.0 and (best is None or d < best[0]):
+                best = (d, (cp[0], cp[1]), "crate")
+        for tr in self.th.npcs():
+            if tr.home is None or self.npc_ban.get(tr.id, -1e9) > t:
+                continue
+            hx, hy = tr.home
+            d = math.hypot(hx - me.pos[0], hy - me.pos[1])
+            if d <= 150.0 and math.hypot(hx - cx, hy - cy) <= rs and (best is None or d + 30 < best[0]):
+                best = (d + 30, (hx, hy), "drone")
+        if best is None:
+            return False
+        d, goal, kind = best
+        if math.hypot(goal[0] - me.pos[0], goal[1] - me.pos[1]) < 20.0:
+            return False                      # there and nothing to shoot: it is gone or hidden
+        self.mv.go(goal, me, z, prefer_cover=True, tag="farm-%s" % kind, replan_dist=6.0)
+        dec.speed = "walk"
+        intent.label = "farm: go to %s" % kind
+        return True
+
 
     # ------------------------------------------------------------------ main
     def shooters(self, me):
@@ -599,6 +680,7 @@ class Tactics:
         if offer and offer.get("choices"):
             ch = offer["choices"]
             dec.pick = max(range(len(ch)), key=lambda i: UPGRADE_PRIORITY.get(ch[i].get("id"), 10))
+        self._remember_crates(me, obs)
         if th.kills > self.kills_seen:
             self.kills_seen = th.kills
             self.relocate_until = t + 9.0
@@ -893,6 +975,10 @@ class Tactics:
                 intent.label = "relocate"
                 dec.speed = "walk"
                 return
+        # 3b. drones and crates for cubes while no threat is near (the chair, Sat 07:20: version 2
+        #     stayed quiet all match)
+        if self._farm(me, obs, dec, slack):
+            return
         # 4. heal: stay out of sight, hold fire
         want_heal = me.hp_frac < 0.93 and me.in_zone and slack > 12.0
         if want_heal:
