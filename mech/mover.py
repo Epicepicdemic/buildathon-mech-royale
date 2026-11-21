@@ -44,6 +44,12 @@ class Mover:
         self.allow_roof = False       # set while we mean to be on a roof (the roof plays)
         self.exposed = False
         self.last_move = None
+        self.hop = None               # routing.Hop in flight
+        self.hop_fol = None           # the follower whose hop it is
+        self.zone_fol = None          # persistent follower for urgent zone runs (paths may hop)
+        self.zone_hops = {}
+        self.zone_fol_t = -1e9
+        self.hops_banned = 0
 
     # ------------------------------------------------------------------ background work
     def work(self, me, zone, deadline):
@@ -101,7 +107,7 @@ class Mover:
     # ------------------------------------------------------------------ goals
     def _set_route(self, route, goal, tag):
         self.route = route
-        self.fol = routing.Follower(self.w, route.pts, route.cum)
+        self.fol = routing.Follower(self.w, route.pts, route.cum, hops=route.hops)
         self.goal = goal
         self.goal_tag = tag
         self.stuck.reset()
@@ -169,10 +175,18 @@ class Mover:
         jump = False
         move = (0.0, 0.0)
         self.urgent = False
+        # 0. a hop in flight keeps the legs until it lands
+        if self.hop is not None:
+            res = self._fly_hop(me)
+            if res is not None:
+                return res
         # 1. islands: low roofs, the stadium bowl, anywhere the grid says we cannot walk out
+        #    (unless a route with hops is taking us across one)
         nf = w.nearest_free(x, y, 3)
         on_island = nf is None or not w.main[nf]
-        if on_island and not self.allow_roof:
+        crossing = (self.route is not None and self.route.hops) or (self.zone_fol is not None and self.zone_hops
+                                                                  and t - self.zone_fol_t < 2.0)
+        if on_island and not self.allow_roof and not crossing:
             esc = self._escape_target(x, y)
             if esc is not None:
                 dx, dy = esc[0] - x, esc[1] - y
@@ -190,10 +204,18 @@ class Mover:
             urgent = self.slack(me, zone) < 3.0
         if urgent and self.field_ready():
             self.urgent = True
-            path = self.zf.path(w.nearest_free(x, y, 4) or n, 40)
-            if len(path) > 1:
-                pts = nav.path_points(w, path)
-                fol = routing.Follower(w, pts)
+            fol = self.zone_fol
+            if fol is None or t - self.zone_fol_t > 1.5 or fol.progress(x, y) > 6.0:
+                path = self.zf.path(w.nearest_free(x, y, 4) or n, 60)
+                self.zone_hops = routing.route_hops(w, path)
+                fol = self.zone_fol = routing.Follower(w, nav.path_points(w, path), hops=self.zone_hops)
+                self.zone_fol_t = t
+            if len(fol.pts) > 1:
+                k = fol.hop_due(x, y)
+                if k is not None:
+                    res = self._start_hop(me, fol, k, self.zone_hops[k])
+                    if res is not None:
+                        return res
                 tx, ty, rem, off = fol.target(x, y)
                 move = unit(tx - x, ty - y)
                 if evasive and exposed:
@@ -209,6 +231,12 @@ class Mover:
                 return [move[0], move[1]], boost, jump
         # 3. follow the route
         commanded = False
+        if self.fol is not None and not hold and self.route is not None:
+            k = self.fol.hop_due(x, y)
+            if k is not None and k in self.route.hops:
+                res = self._start_hop(me, self.fol, k, self.route.hops[k])
+                if res is not None:
+                    return res
         if self.fol is not None and not hold:
             tx, ty, rem, off = self.fol.target(x, y)
             if off > 10.0 and self.route is not None and self.goal is not None:
@@ -263,6 +291,51 @@ class Mover:
             # in the air the boost button is the jets: running speed is not wanted up there
             boost = False
         return [move[0], move[1]], boost, jump
+
+    # ------------------------------------------------------------------ hops
+    def _start_hop(self, me, fol, k, info):
+        """At the launch point of hop k: start it (or wait for the energy it needs)."""
+        climb = info.top > me.pos[2] + 0.6
+        if climb and me.energy < info.energy:
+            self.note = "hop: waiting for energy"
+            return [0.0, 0.0], False, False
+        self.hop = routing.Hop(me.t, fol.pts[k], fol.pts[k + 1], info, self.w)
+        self.hop_fol = fol
+        return self._fly_hop(me)
+
+    def _fly_hop(self, me):
+        h = self.hop
+        mv, boost, jump = h.step(me.t, me.pos[0], me.pos[1], me.pos[2], me.grounded, me.energy)
+        if h.done:
+            if self.hop_fol is not None:
+                self.hop_fol.passed_hop(h.info.idx)
+            self.hop = None
+            self.hop_fol = None
+            self.stuck.reset()
+            self.stuck.grace(me.t + 1.2)
+            return None
+        if h.failed:
+            # never try that one again this match: ban the edge and rebuild the zone field without it
+            fol = self.hop_fol
+            if fol is not None:
+                a = self.w.nearest_free(fol.pts[h.info.idx][0], fol.pts[h.info.idx][1], 2)
+                b = self.w.nearest_free(fol.pts[h.info.idx + 1][0], fol.pts[h.info.idx + 1][1], 2)
+                if a is not None and b is not None:
+                    self.w.ban_hop(a, b)
+                    self.hops_banned += 1
+            self.zf_key = None
+            self.hop = None
+            self.hop_fol = None
+            self.zone_fol = None
+            # drop the route: the tactics layer asks for its goal again next decision and the
+            # planner starts from where we are now
+            self.route = None
+            self.fol = None
+            self.goal = None
+            self.replans += 1
+            return None
+        self.note = "hop"
+        return [mv[0], mv[1]], boost, jump
 
     def _unstick(self, st, me, jump, boost):
         if st >= 1 and me.grounded:

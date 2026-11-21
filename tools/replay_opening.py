@@ -172,6 +172,79 @@ def summarise(rows, label):
         print(f"- {name}: fired by 10 s {f10:.0%}; seen by 5 s {s5:.0%}; landed a hit before taking one {h_first:.0%}")
 
 
+def showdown_hours(recordings):
+    """{seed: 'E1' | 'E2' | ...} from the scout's tables.md (E1.x = 10 PM, E2.x = 11 PM, E3.x = midnight)."""
+    out = {}
+    p = os.path.join(recordings, "tables.md")
+    if not os.path.exists(p):
+        return out
+    for line in open(p, encoding="utf-8"):
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 3 and cells[0].startswith("E") and "." in cells[0] and cells[2].isdigit():
+            out[int(cells[2])] = cells[0].split(".")[0]
+    return out
+
+
+def midgame(world, m, t0=90.0, t1=300.0):
+    """For mechs alive at t0: share of [t0, min(t1, death)] seen by an opponent, damage dealt and
+    taken, cubes gained, distance from the live circle's centre as a share of its radius."""
+    hz = m.hz
+    alive0 = [i for i in m.roster if m.death_t(i) > t0]
+    if not alive0:
+        return []
+    zone_by_tick = {t: m.frames[t].get("z") for t in m.ticks}
+    hits = [e for e in m.events if e.get("e") == "hit" and e.get("src") in m.roster and e.get("dst") in m.roster
+            and e["src"] != e["dst"] and t0 * hz <= e["t"] <= t1 * hz]
+    out = []
+    for i in alive0:
+        rows = m.rows.get(i, {})
+        end = min(t1, m.death_t(i), m.ticks[-1] / hz)
+        if end <= t0 + 5:
+            continue
+        seen = n = 0
+        rel = []
+        for t in m.ticks:
+            tt = t / hz
+            if tt < t0 or tt > end or t % 10 or t not in rows:
+                continue
+            n += 1
+            ri = rows[t]
+            for j in m.roster:
+                if j != i and m.alive_at(j, tt) and t in m.rows.get(j, {}) and sees(world, m.rows[j][t], ri):
+                    seen += 1
+                    break
+            z = zone_by_tick.get(t)
+            if z:
+                rel.append(math.hypot(ri[R.X] - z[0], ri[R.Y] - z[1]) / max(1.0, z[2]))
+        k0 = max([t for t in rows if t / hz <= t0] or [min(rows)])
+        k1 = max([t for t in rows if t / hz <= end] or [k0])
+        out.append(dict(match=m.seed, id=i, place=m.roster[i].get("place"), death=m.death_t(i),
+                        seen=seen / n if n else None,
+                        dealt=sum(e["amt"] for e in hits if e["src"] == i and e["t"] <= end * hz) / max(1.0, end - t0) * 60,
+                        taken=sum(e["amt"] for e in hits if e["dst"] == i and e["t"] <= end * hz) / max(1.0, end - t0) * 60,
+                        cubes=(rows[k1][R.CUBES] - rows[k0][R.CUBES]) / max(1.0, end - t0) * 60,
+                        cubes_at_90=rows[k0][R.CUBES], rel_r=statistics.median(rel) if rel else None))
+    return out
+
+
+def summarise_mid(rows, label):
+    groups = [("placed 1-3", [r for r in rows if r["place"] <= 3]),
+              ("placed 4-6", [r for r in rows if 4 <= r["place"] <= 6]),
+              ("placed 7+", [r for r in rows if r["place"] >= 7])]
+    keys = ["seen", "dealt", "taken", "cubes", "cubes_at_90", "rel_r"]
+    print(f"\n## {label}: mechs alive at 90 s, 90-300 s (per minute where a rate)")
+    print("| group | n | seen share | damage dealt /min | damage taken /min | cubes /min | cubes at 90 s | distance from centre / radius |")
+    print("|---|---|---|---|---|---|---|---|")
+    for name, sub in groups:
+        if not sub:
+            continue
+        cells = []
+        for k in keys:
+            v = [r[k] for r in sub if r[k] is not None]
+            cells.append(f"{statistics.median(v):.2f}" if v else "—")
+        print(f"| {name} | {len(sub)} | " + " | ".join(cells) + " |")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("recordings")
@@ -180,19 +253,34 @@ def main():
     a = ap.parse_args()
     world = World(a.world) if a.world else World()
     ms = R.load(R.default_dirs(a.recordings))
+    hours = showdown_hours(a.recordings)
     rows = []
+    mids = []
     for m in ms:
         rows.extend(analyse_match(world, m))
+        if m.kind in ("reair", "showdown"):
+            for r in midgame(world, m):
+                r["hour"] = hours.get(m.seed)
+                mids.append(r)
         print(f"match {m.seed} ({m.kind}) done", file=sys.stderr, flush=True)
+    for r in rows:
+        r["hour"] = hours.get(r["match"])
     if a.json:
         with open(a.json, "w") as f:
-            json.dump(rows, f, indent=1)
+            json.dump({"opening": rows, "mid": mids}, f, indent=1)
     ex = [r for r in rows if r["kind"] in ("reair", "showdown")]
     lob = [r for r in rows if r["kind"] not in ("reair", "showdown")]
     print(f"{len(ms)} matches: {len(set(r['match'] for r in ex))} between team bots, "
           f"{len(set(r['match'] for r in lob))} public lobbies")
-    summarise(ex, "Team-bot matches")
+    summarise(ex, "Team-bot matches, all")
+    names = {"E1": "10 PM showdown", "E2": "11 PM showdown", "E3": "midnight showdown"}
+    for h in sorted(set(r["hour"] for r in ex if r["hour"])):
+        summarise([r for r in ex if r["hour"] == h], f"Team-bot matches, {names.get(h, h)}")
     summarise(lob, "Public lobbies (house bots and humans)")
+    summarise_mid(mids, "Mid-game, team-bot matches, all")
+    later = [r for r in mids if r.get("hour") in ("E2", "E3")]
+    if later:
+        summarise_mid(later, "Mid-game, 11 PM and midnight showdowns")
 
 
 if __name__ == "__main__":

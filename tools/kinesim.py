@@ -53,8 +53,9 @@ class KMech:
             return False                     # ledge too high for our feet
         if w.clearance(x, y) >= self.r:
             return True
-        # inside wall clearance: only free if we are above whatever is there
-        return z >= self._top_near(x, y) - 0.05
+        # inside wall clearance: free if what is there is no higher than a step above our feet
+        # (the rulebook walks a mech up ledges of step_up)
+        return z >= self._top_near(x, y) - self.step
 
     def substep(self, move, boost, jump, dt=0.05):
         mx, my = move
@@ -106,7 +107,7 @@ class KMech:
         # vertical: stand on the floor, or on top of a prism when we are above it (roofs)
         f = self.w.floor(self.x, self.y)
         top = self.w.sight(self.x, self.y)
-        if top > f + self.step and self.z >= top - 0.6:
+        if top > f + self.step and self.z >= top - self.step:
             f = top
         if self.grounded:
             if f < self.z - 0.6:

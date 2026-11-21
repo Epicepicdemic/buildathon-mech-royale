@@ -57,6 +57,18 @@ class World:
         self.roof_id = layer("roof_id", "H")
         self.main = layer("main", None)       # 1 = node in the main walkable area
         self.arc = layer("arc", None)         # share of directions with a hiding wall within 12 m (x255)
+        # jump-and-jet edges (tools/build_world.py): hop_out[n] = ((m, cost m, energy, top z), ...),
+        # hop_in[m] = ((n, cost m), ...) for the reverse search of the zone field
+        self.hop_out = {}
+        self.hop_in = {}
+        if "hops" in meta["layers"]:
+            raw = layer("hops", None)
+            out, inn = {}, {}
+            for src, dst, cost, energy, top in struct.iter_unpack("<iiHBh", raw):
+                out.setdefault(src, []).append((dst, cost * 0.1, energy, top * 0.1))
+                inn.setdefault(dst, []).append((src, cost * 0.1))
+            self.hop_out = {k: tuple(v) for k, v in out.items()}
+            self.hop_in = {k: tuple(v) for k, v in inn.items()}
         nu = self.nu
         self.dirs = [tuple(d) for d in meta["dirs"]]
         self.offs = [dv * nu + du for du, dv in self.dirs]
@@ -107,6 +119,20 @@ class World:
 
     def free(self, n):
         return self.edges[n] != 0
+
+    def ban_hop(self, a, b):
+        """A hop that failed in this match: take it out of both planners for the rest of the match."""
+        if a in self.hop_out:
+            self.hop_out[a] = tuple(h for h in self.hop_out[a] if h[0] != b)
+        if b in self.hop_in:
+            self.hop_in[b] = tuple(h for h in self.hop_in[b] if h[0] != a)
+
+    def hop(self, a, b):
+        """The hop edge a -> b as (cost, energy, top z), or None."""
+        for m, c, e, top in self.hop_out.get(a, ()):
+            if m == b:
+                return (c, e, top)
+        return None
 
     def neighbors(self, n):
         return self.nbr_table[self.edges[n]]

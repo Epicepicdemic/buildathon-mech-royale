@@ -16,6 +16,7 @@ lookup tables that `mech/world.py` loads with the standard library:
   roof    int16 dm   roof height if a mech can stand here on a roof, else -32768
   arc     uint8      share of directions with a hiding wall within 12 m (x255)
   main    uint8      1 = node in the main walkable area
+  hops    records    directed jump-and-jet edges (src node, dst node, cost dm, energy, top dm)
 A JSON block carries the roof patches and the parameters used. No ranked list of positions is
 shipped: the bot scores cells against the live threats each time.
 
@@ -42,6 +43,10 @@ HIDE_H = 9.0              # a wall this tall above our floor hides a mech
 # neighbour k: (du, dv). Bit k of `edges` is the move to that neighbour.
 DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 NFAN = 32
+HOP_MAX_RISE = 12.0       # highest climb a hop edge may need (about 20 energy)
+HOP_MAX_DROP = 34.0       # deepest drop (recorded falls of 32 m did no damage)
+HOP_RISE_COST = 3.0       # walking metres charged per metre climbed
+HOP_FIXED_COST = 25.0     # walking metres charged per hop (the jump, the landing, being seen in the air)
 CROWN_ERODE = 0.15        # metres taken off each crown's semi-axes (see the canopy section)
 
 
@@ -259,6 +264,86 @@ def build(arena, out):
     MAIN = (comp == main_id).astype(np.uint8).reshape(NV, NU)
     log(f"components {len(sizes)} main={sizes[main_id]} {time.time() - t0:.1f}s")
 
+    # ---- hop edges: jump and jet over what blocks a straight walk (version 3)
+    # From a free node to one 4-14 m away when walking straight there is blocked by something we can
+    # clear: a low wall, the edge of a low roof (up onto it), or a drop off one (falls do no damage:
+    # recorded falls of 15.3 and 32 m cost nothing). The climb (top of the obstacle or the landing
+    # floor, above our floor) is at most HOP_MAX_RISE; nothing may overhang the flight (no bridge
+    # or eave above); the landing node is a normal free node. Directed: a climb one way is a drop
+    # the other. Each node keeps its cheapest edge per 45 degree sector, and the cost (in metres of
+    # walking) charges for the climb, so the planner walks round anything cheaper to walk round.
+    hop_src, hop_dst, hop_cost, hop_energy, hop_top = [], [], [], [], []
+    near_wall = node_ok & (cl2 < 9.0)
+    offsets = []
+    for dv in range(-7, 8):
+        for du in range(-7, 8):
+            L = 2.0 * math.hypot(du, dv)
+            if 3.9 <= L <= 14.2:
+                offsets.append((du, dv, L, math.atan2(dv, du)))
+    best = {}          # (src node, sector) -> (cost, dst, energy, top)
+    vv0, uu0 = np.nonzero(near_wall)
+    src_flat = vv0 * NU + uu0
+    f_src = fl2[vv0, uu0]
+    for du, dv, L, ang in offsets:
+        vt, ut = vv0 + dv, uu0 + du
+        inb = (vt >= 0) & (vt < NV) & (ut >= 0) & (ut < NU)
+        vtc, utc = np.clip(vt, 0, NV - 1), np.clip(ut, 0, NU - 1)
+        ok = inb & node_ok[vtc, utc]
+        if not ok.any():
+            continue
+        f_dst = fl2[vtc, utc]
+        ns = max(2, int(L / 0.5))
+        top = np.full(len(vv0), -1e9)
+        walk_blocked = np.zeros(len(vv0), bool)
+        overhang = np.zeros(len(vv0), bool)
+        # the body is 5 m wide: the top is the highest thing within its radius of the line
+        px_, py_ = -math.sin(ang), math.cos(ang)
+        for k in range(1, ns):
+            fr = k / ns
+            jc = 2 * vv0 + 2 * dv * fr
+            ic = 2 * uu0 + 2 * du * fr
+            jj = np.clip(np.rint(jc).astype(int), 0, ny - 1)
+            ii = np.clip(np.rint(ic).astype(int), 0, nx - 1)
+            walk_blocked |= (clear[jj, ii] < EDGE_CLEAR) | steep[jj, ii]
+            for off in (-2.5, -1.25, 0.0, 1.25, 2.5):
+                jo = np.clip(np.rint(jc + py_ * off).astype(int), 0, ny - 1)
+                io = np.clip(np.rint(ic + px_ * off).astype(int), 0, nx - 1)
+                np.maximum(top, sight[jo, io], out=top)
+                overhang |= walk_under[jo, io]
+        hi = np.maximum(top, f_dst)
+        rise = hi - f_src
+        obstacle = (top - f_src > STEP_UP) | (np.abs(f_dst - f_src) > STEP_UP)
+        # a climb onto a higher floor lands well inside it (4 m clear), away from edges and taller parts
+        land_clear = cl2[vtc, utc]
+        up = f_dst > f_src + STEP_UP
+        good = ok & walk_blocked & obstacle & ~overhang & (rise <= HOP_MAX_RISE) & (f_src - f_dst <= HOP_MAX_DROP) \
+            & (~up | (land_clear >= 4.0))
+        if not good.any():
+            continue
+        climb = np.maximum(rise, 0.0)
+        cost = L + HOP_RISE_COST * climb + HOP_FIXED_COST
+        energy = np.where(climb > 2.4, (climb - 2.4) / 8.9 * 15.0 + 6.0, 2.0)
+        sector = int(round(ang / (math.pi / 4))) % 8
+        for idx in np.nonzero(good)[0]:
+            key = (int(src_flat[idx]), sector)
+            c = float(cost[idx])
+            cur = best.get(key)
+            if cur is None or c < cur[0]:
+                best[key] = (c, int(vtc[idx] * NU + utc[idx]), float(energy[idx]), float(hi[idx]))
+    for (src, _sec), (c, dst, en, hi_) in best.items():
+        hop_src.append(src)
+        hop_dst.append(dst)
+        hop_cost.append(c)
+        hop_energy.append(en)
+        hop_top.append(hi_)
+    HOPS = np.zeros(len(hop_src), dtype=[("src", "<i4"), ("dst", "<i4"), ("cost", "<u2"), ("energy", "u1"), ("top", "<i2")])
+    HOPS["src"] = hop_src
+    HOPS["dst"] = hop_dst
+    HOPS["cost"] = np.clip(np.round(np.array(hop_cost) * 10), 0, 65535)
+    HOPS["energy"] = np.clip(np.round(hop_energy), 0, 255)
+    HOPS["top"] = np.clip(np.round(np.array(hop_top) * 10), -32767, 32767)
+    log(f"hop edges {len(HOPS)} {time.time() - t0:.1f}s")
+
     # ---- canopy (1 m vertices): the vertical chord of each tree crown over the vertex.
     # A crown is an ellipsoid centred halfway between crownBase and height, horizontal radius crownR,
     # vertical semi-axis (height - crownBase) / 2 (at least 0.5 m): the shape the organisers' viewer
@@ -436,6 +521,7 @@ def build(arena, out):
         "roof_id": np.where(lab >= 0, lab, 65535).astype("<u2"),
         "main": MAIN,
         "arc": ARC,
+        "hops": HOPS,
     }
     meta = {
         "nx": nx, "ny": ny, "x0": x0, "y0": y0, "step": T["step"],

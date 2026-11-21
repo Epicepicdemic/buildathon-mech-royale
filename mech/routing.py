@@ -65,9 +65,116 @@ def enter_length(world, nodes, cx, cy, r):
     return INF
 
 
+class HopInfo:
+    __slots__ = ("idx", "top", "energy", "land_floor", "launch_floor")
+
+    def __init__(self, idx, top, energy, land_floor, launch_floor):
+        self.idx, self.top, self.energy = idx, top, energy
+        self.land_floor, self.launch_floor = land_floor, launch_floor
+
+
+def route_hops(world, nodes):
+    """{index k: HopInfo} for steps nodes[k] -> nodes[k + 1] that are hop edges (not grid neighbours)."""
+    out = {}
+    nu = world.nu
+    for k in range(len(nodes) - 1):
+        a, b = nodes[k], nodes[k + 1]
+        va, ua = divmod(a, nu)
+        vb, ub = divmod(b, nu)
+        if abs(ua - ub) <= 1 and abs(va - vb) <= 1:
+            continue
+        h = world.hop(a, b)
+        if h is None:
+            continue
+        ax, ay = world.node_xy(a)
+        bx, by = world.node_xy(b)
+        out[k] = HopInfo(k, h[2], h[1], world.floor(bx, by), world.floor(ax, ay))
+    return out
+
+
+class Hop:
+    """Flying one hop edge: walk at the obstacle, jump, jet until the feet clear its top, cross with
+    the feet kept above whatever is under the body, carry on to the landing node and come down.
+    Pressing toward the landing while rising is safe: walls slide us. A drop (nothing above our
+    feet) is a walk off the edge."""
+    TIMEOUT = 6.0
+    CLEAR = 0.9           # feet this far above the top before we stop climbing
+    BODY = 2.7            # radius of the footprint that must be clear before we come down
+
+    def __init__(self, t, launch, land, info, world=None):
+        self.t0 = t
+        self.launch, self.land, self.info = launch, land, info
+        self.w = world
+        self.left_ground = False
+        self.cleared = False       # the feet have been above the top
+        self.tries = 0
+        self.done = False
+        self.failed = False
+
+    def _under(self, x, y):
+        """Highest solid under our footprint (sight raster), or -inf without a world."""
+        w = self.w
+        if w is None:
+            return -1e9
+        b = self.BODY
+        best = -1e9
+        for dx, dy in ((0.0, 0.0), (b, 0.0), (-b, 0.0), (0.0, b), (0.0, -b),
+                       (0.7 * b, 0.7 * b), (-0.7 * b, 0.7 * b), (0.7 * b, -0.7 * b), (-0.7 * b, -0.7 * b)):
+            v = w.sight(x + dx, y + dy)
+            if v > best:
+                best = v
+        return best
+
+    def step(self, t, x, y, z, grounded, energy):
+        """(move, boost, jump) for this decision; sets done / failed."""
+        info = self.info
+        dx, dy = self.land[0] - x, self.land[1] - y
+        d = math.hypot(dx, dy)
+        mv = unit(dx, dy) if d > 0.3 else (0.0, 0.0)
+        if t - self.t0 > self.TIMEOUT:
+            self.failed = True
+            return (0.0, 0.0), False, False
+        climb = info.top > z + 0.6 and not self.cleared
+        if grounded:
+            near_land = d < 3.0 or (abs(z - info.land_floor) < 1.3 and d < 7.0 and t - self.t0 > 0.4)
+            if info.land_floor > info.launch_floor + 1.2 and z < info.land_floor - 1.0:
+                near_land = False      # a climb is done only once we are up there
+            if self.left_ground and near_land:
+                self.done = True
+                return mv, False, False
+            if not climb:
+                # a drop, or we are up already: walk on toward the landing
+                if near_land and t - self.t0 > 0.2:
+                    self.done = True
+                return mv, False, False
+            if self.left_ground:
+                self.tries += 1
+                if self.tries > 2:
+                    self.failed = True
+                    return (0.0, 0.0), False, False
+            self.left_ground = True
+            return mv, False, True
+        self.left_ground = True
+        if z >= info.top + self.CLEAR - 0.05:
+            self.cleared = True
+        if not self.cleared:
+            boost = z < info.top + self.CLEAR and energy > 0.5
+        else:
+            # crossing: hold the feet above whatever is still under the body, then come down
+            under = self._under(x, y)
+            boost = under > info.land_floor + 1.2 and z < under + 0.8 and energy > 0.5
+            if not boost and self.w is not None and info.land_floor > info.launch_floor + 1.2 \
+                    and self.w.floor(x, y) < info.land_floor - 1.0 and z < info.land_floor + 0.8 and energy > 0.5:
+                boost = True           # up onto a roof: stay above it until our centre is over it
+            elif not boost and d < 3.5:
+                mv = (0.0, 0.0)        # over the landing: stop pushing, or momentum carries us past
+        return mv, boost, False
+
+
 class Route:
     def __init__(self, world, nodes, kind, boost, enter_len, fast_len):
         self.nodes = nodes
+        self.hops = route_hops(world, nodes)
         self.pts = nav.path_points(world, nodes)
         cum = [0.0]
         for a, b in zip(self.pts, self.pts[1:]):
@@ -182,9 +289,10 @@ class Follower:
 
     LOOKAHEAD = 14          # nodes (about 28 m)
 
-    def __init__(self, world, pts, cum=None):
+    def __init__(self, world, pts, cum=None, hops=None):
         self.w = world
         self.pts = pts
+        self.hops = sorted(hops) if hops else []     # indices k: pts[k] -> pts[k + 1] is a hop
         if cum is None:
             cum = [0.0]
             for a, b in zip(pts, pts[1:]):
@@ -205,12 +313,36 @@ class Follower:
             self.i = best[1]
         return math.sqrt(best[0]) if best else INF
 
+    def next_hop(self):
+        for k in self.hops:
+            if k >= self.i - 1:
+                return k
+        return None
+
+    def hop_due(self, x, y, reach=2.6):
+        """Index of a hop that starts here (we are at its launch point), or None."""
+        k = self.next_hop()
+        if k is None:
+            return None
+        px, py = self.pts[k]
+        if math.hypot(px - x, py - y) <= reach:
+            return k
+        return None
+
+    def passed_hop(self, k):
+        """The hop at k has been flown: carry on from its landing point."""
+        self.i = k + 1
+        self.hops = [h for h in self.hops if h > k]
+
     def target(self, x, y):
         """(tx, ty, remaining_m, off_path_m)."""
         off = self.progress(x, y)
         pts = self.pts
         last = len(pts) - 1
         j = min(last, self.i + self.LOOKAHEAD)
+        k = self.next_hop()
+        if k is not None:
+            j = min(j, max(k, self.i))          # never aim past the launch point of a hop
         w = self.w
         probes = 0
         while j > self.i + 1:
@@ -240,7 +372,15 @@ class StuckMonitor:
         self.since = None
         self.events = 0
 
+    def grace(self, until):
+        """No stuck calls before `until` (just landed from a hop: air control is weak, so we leave a
+        landing slowly, and that is not being stuck)."""
+        self.grace_until = until
+        self.hist.clear()
+
     def update(self, t, x, y, commanded):
+        if t < getattr(self, "grace_until", -1e9):
+            return 0
         self.hist.append((t, x, y, commanded))
         while self.hist and t - self.hist[0][0] > 1.2:
             self.hist.pop(0)

@@ -167,6 +167,19 @@ class Tactics:
             return False
         return not any(o.sees_us for o in enemies if o is not e)
 
+    def _worth_starting(self, me, e, enemies):
+        if not e.in_obs:
+            return False
+        d = self._dist(me, e)
+        # close by with nobody else watching us (behind a wall is fine: corners and pop-ups)
+        if d <= 90.0 and not any(o.sees_us for o in enemies if o is not e):
+            return True
+        if not e.shootable():
+            return False
+        if e.engaged_elsewhere(me.t) and d <= 170.0:
+            return True
+        return e.hp is not None and e.hp <= 0.45 * (e.max_hp or 1400.0) and d <= 140.0
+
     def _commit(self, me, play, target, calc, others, sit):
         """Hold a fight once it starts. Version 2 flipped between assault, corner and break every few
         tenths of a second, so it neither kept firing nor got away. A fight is left early only for
@@ -182,8 +195,9 @@ class Tactics:
             if lost < 0.22 and me.hp_frac > 0.35 and not newcomer and not sit.unseen_hit and \
                     calc is not None and calc.ratio >= 0.45:
                 return prev
-        if prev == D.BREAK and play in (D.ASSAULT, D.CORNER) and dwell < COMMIT_BREAK_S and \
+        if prev == D.BREAK and play in (D.ASSAULT, D.CORNER) and dwell < COMMIT_BREAK_S and same and \
                 not (calc is not None and calc.finishable):
+            # only a break from this same enemy is held; one chosen when nobody was in view is not
             return D.BREAK
         return play
 
@@ -295,10 +309,10 @@ class Tactics:
         for c in obs.get("cubes") or []:
             cp = c.get("pos")
             d = math.hypot(cp[0] - me.pos[0], cp[1] - me.pos[1])
-            if d > 55 or abs(cp[2] - me.pos[2]) > 3.5:
+            if d > 90 or abs(cp[2] - me.pos[2]) > 3.5:
                 continue
-            if best is None or d * 0.8 < best[0]:
-                best = (d * 0.8, ("cube", c["id"], (cp[0], cp[1]), None, False))
+            if best is None or d * 0.6 < best[0]:
+                best = (d * 0.6, ("cube", c["id"], (cp[0], cp[1]), None, False))
         if best is not None:
             return best[1]
         return None
@@ -361,7 +375,22 @@ class Tactics:
     def decide(self, me, obs):
         dec = self._decide(me, obs)
         self._return_fire(me, dec)
+        self._reload_discipline(me, dec)
         return dec
+
+    def _reload_discipline(self, me, dec):
+        """A reload is 2.4 s without the gun. Start one early only when nothing could make us pay for
+        it: no mech we could shoot within 150 m and nothing has hit us in 3 s. (Squad trace, seed 8:
+        version 3's first build reloaded with 7 rounds left in a duel it was winning, took 315 HP
+        in the 2.4 s and lost.) An empty magazine still reloads (the gunner does that anyway)."""
+        intent = dec.intent
+        if intent is None or not intent.reload_ok:
+            return
+        t = me.t
+        for e in self.th.active_mechs(t, 3.0):
+            if t - e.t_hit_us <= 3.0 or (e.shootable() and self._dist(me, e) <= 150.0):
+                intent.reload_ok = False
+                return
 
     def _return_fire(self, me, dec):
         """Whatever the play (a break, healing, loot, an air manoeuvre): while a mech has a line of
@@ -429,6 +458,13 @@ class Tactics:
         fightable = enemies
         if t < OPENING_S:
             fightable = [e for e in enemies if e.engaging(t) or self._easy_kill(me, e, enemies)]
+        else:
+            # the middle of the match (recorded showdowns, 90-300 s): the top three took half the
+            # damage per minute that places 4-6 took, while dealing less. Fight whatever fights us;
+            # start a fight only when it pays: a mech we can finish, one busy with someone else (the
+            # third party gets the kill), or one close by when nobody else is about.
+            fightable = [e for e in enemies if e.engaging(t) or self._easy_kill(me, e, enemies) or
+                         self._worth_starting(me, e, enemies)]
         corner_ready = self.cov.hide is not None and self.cov.peek is not None
         target, calc = D.pick_target(lambda e: self.situation(me, e, [o for o in enemies if o is not e], corner_ready),
                                      fightable, t, me.xy)
@@ -598,8 +634,10 @@ class Tactics:
         z = self.zone
         intent = dec.intent
         self.loot_note = ""
-        recent = [tr for tr in self.th.mechs() if t - max(tr.t_seen, tr.t_heard, tr.t_hit_us) <= 25.0]
-        quiet = not recent and not [c for c in self.th.contacts if t - c.t <= 8.0]
+        # shooting a crate or a drone is heard at 220-320 m: only with no mech seen or heard close by lately
+        recent = [tr for tr in self.th.mechs() if t - max(tr.t_seen, tr.t_hit_us) <= 8.0 or
+                  (t - tr.t_heard <= 5.0 and self._dist(me, tr) < 160.0)]
+        quiet = not recent and not [c for c in self.th.contacts if t - c.t <= 5.0 and c.band != "far"]
         # 1. the opening: get out of sight first
         if not self.opening_done:
             if t > 35.0:
@@ -647,8 +685,12 @@ class Tactics:
                 return
         # 2. cubes and weapons lying nearby when nobody is on us (walking does not stop healing),
         #    including the cubes a kill drops, before we move on
-        near_active = [tr for tr in self.th.active_mechs(t, 6.0) if self._dist(me, tr) < 90.0]
-        safe = not near_active and t - self.th.t_taken > 5.0 and not any(tr.sees_us for tr in self.th.mechs())
+        # cubes are how the most consistent showdown team wins the middle of the match (13 a match,
+        # twice anyone else; top-three finishers kept collecting from 90 s on, places 4-6 did not):
+        # collect whenever nothing is fighting us or watching us from close by
+        near_active = [tr for tr in self.th.active_mechs(t, 4.0) if self._dist(me, tr) < 60.0
+                       or (tr.sees_us and self._dist(me, tr) < 120.0)]
+        safe = not near_active and t - self.th.t_taken > 3.0 and not self.shooters(me) and me.hp_frac >= 0.3
         # after a fight, a third mech waits for the winner: unless nothing has been heard nearby,
         # get out of sight and heal before collecting
         noisy = any(not tr.dead and t - max(tr.t_seen, tr.t_heard) <= 10.0 for tr in self.th.mechs()) or \
