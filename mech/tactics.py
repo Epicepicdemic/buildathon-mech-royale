@@ -453,12 +453,17 @@ class Tactics:
         t = me.t
         intent = dec.intent
         cur = dec.target
-        if cur is not None and cur.kind == "mech" and cur.track is not None and cur.track in sh and \
-                intent is not None and intent.fire not in ("none", "single"):
+        # whoever hit us last, else the nearest
+        pick = min(sh, key=lambda e: self._dist(me, e) - (150.0 if t - e.t_hit_us <= 1.5 else 0.0))
+        keep = cur is not None and cur.kind == "mech" and cur.track is not None and cur.track in sh and \
+            intent is not None and intent.fire not in ("none", "single")
+        if keep and cur.track is not pick and t - cur.track.t_hit_us > 1.5 and t - pick.t_hit_us <= 1.5 \
+                and self._dist(me, pick) < self._dist(me, cur.track):
+            keep = False                 # a closer mech is the one hitting us: answer it
+        if keep:
             best = cur.track
         else:
-            # whoever hit us last, else the nearest
-            best = min(sh, key=lambda e: self._dist(me, e) - (150.0 if t - e.t_hit_us <= 1.5 else 0.0))
+            best = pick
             dec.target = Target.from_track(best, t, float((self.cfg.get("cubes") or {}).get("size_per_cube", 0.05)))
         if intent is not None:
             if intent.fire in ("none", "single"):

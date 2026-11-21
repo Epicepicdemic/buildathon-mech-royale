@@ -110,6 +110,25 @@ class AirTests(unittest.TestCase):
         self.assertTrue(any(a["fire"][0] for a in acts))
 
 
+class TargetChoiceTests(unittest.TestCase):
+    def test_answers_the_close_attacker_not_a_far_passive_mech(self):
+        """Sandbox seed 14: version 3's first build shot a mech 175 m away while another killed it
+        from 39 m."""
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.opening_done = True
+        me = (300.0, -60.0)
+        near = (339.0, -60.0)
+        far = (300.0, 115.0)
+        # the far one faces us (so it counts as engaging) and is in view first; then the near one opens up
+        mechs = lambda k: [enemy(15, far[0], far[1], w, -math.pi / 2)] + \
+            ([enemy(1, near[0], near[1], w, math.pi)] if k >= 4 else [])
+        hits = lambda k: [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": 0.0, "by": 1}] \
+            if k >= 4 and k % 2 == 0 else []
+        acts = run(bot, me, 120.0, 14, mechs, events_fn=hits)
+        self.assertLess(angdiff(acts[-1]["aim"][0], 0.0), 0.25)      # torso on the near attacker (east)
+
+
 class SquadTests(unittest.TestCase):
     """The red team's squad spreads round us so one bot is always behind whatever we face: fight
     them one at a time from a spot hidden from all of them but one."""

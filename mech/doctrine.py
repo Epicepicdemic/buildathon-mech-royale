@@ -442,17 +442,19 @@ def pick_target(sit_factory, enemies, t, me_pos):
     for e in enemies:
         sit = sit_factory(e)
         calc = FightCalc(sit, e)
-        score = calc.ratio
+        # the ratio is clipped: a mech that is not shooting at us scores a high ratio just for that,
+        # and version 3's first build shot one at 175 m while another killed it from 39 m
+        score = min(3.0, max(0.3, calc.ratio))
         visible = e.shootable() if hasattr(e, "shootable") else getattr(e, "los", False)
         if not visible:
             score *= 0.35            # a memory or a sound: anything we can actually shoot comes first
         if e.engaged_elsewhere(t) if hasattr(e, "engaged_elsewhere") else False:
             score *= 1.3
         if getattr(e, "t_hit_us", -1e9) >= t - 2.0:
-            score *= 2.0             # whoever is hitting us now
+            score *= 4.0             # whoever is hitting us now
         if calc.finishable and visible:
             score *= 1.6
-        score /= 1.0 + calc.dist / 250.0
+        score /= 1.0 + calc.dist / 120.0
         if best is None or score > best[0]:
             best = (score, e, calc)
     return (best[1], best[2]) if best else (None, None)
