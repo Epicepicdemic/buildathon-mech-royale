@@ -140,7 +140,27 @@ def pred_mean(muzzle, c, v, hist):
     return q
 
 
-PREDICTORS = {"no lead": pred_none, "ours (v2)": pred_ours, "lead x0.75": make_damped(0.75),
+def make_accel(k=0.5, vmax=19.5):
+    """Ours plus `k` times the acceleration seen over the last 0.3 s (hist2 = velocity then), with
+    the predicted speed capped at boost speed."""
+    def f(muzzle, c, v, hist, hist2=None):
+        if hist2 is None:
+            return pred_ours(muzzle, c, v, hist)
+        ax, ay = (v[0] - hist2[0]) / 0.3 * k, (v[1] - hist2[1]) / 0.3 * k
+        # flight time from the plain lead, then add the acceleration term
+        _, _, tf, q = bal.lead(muzzle, c, v, SPEED, latency=FIRE_DELAY)
+        T = tf + FIRE_DELAY
+        vx, vy = v[0] + ax * T, v[1] + ay * T
+        sp = math.hypot(vx, vy)
+        if sp > vmax:
+            s_ = vmax / sp
+            ax, ay = (vx * s_ - v[0]) / T, (vy * s_ - v[1]) / T
+        return (q[0] + 0.5 * ax * T * T, q[1] + 0.5 * ay * T * T, q[2])
+    f.wants_hist2 = True
+    return f
+
+
+PREDICTORS = {"no lead": pred_none, "ours + accel x0.5": make_accel(0.5), "ours + accel x1": make_accel(1.0), "ours (v2)": pred_ours, "lead x0.75": make_damped(0.75),
               "lead x0.5": make_damped(0.5), "ours, no vz on ground": pred_ground, "mean vel 0.6 s": pred_mean}
 
 
@@ -162,13 +182,14 @@ def lead_test(matches, rng, step=0.5, spread_samples=4):
                     t += step
                     continue
                 hist = ((p0[0] - a[0]) / 0.6, (p0[1] - a[1]) / 0.6, 0.0)
+                v_prev = tr.vel(t - 0.3)
                 spd = math.hypot(v[0], v[1])
                 c = (p0[0], p0[1], p0[2] + HEIGHT / 2)
                 for D in RANGES:
                     ang = rng.uniform(-math.pi, math.pi)
                     muzzle = (p0[0] + math.cos(ang) * D, p0[1] + math.sin(ang) * D, p0[2] + MUZZLE)
                     for name, f in PREDICTORS.items():
-                        q = f(muzzle, c, v, hist)
+                        q = f(muzzle, c, v, hist, v_prev) if getattr(f, "wants_hist2", False) else f(muzzle, c, v, hist)
                         yaw, pitch = bal.aim_angles(q[0] - muzzle[0], q[1] - muzzle[1], q[2] - muzzle[2])
                         d = unit3(yaw, pitch)
                         origin = (muzzle[0] + d[0] * 3.0, muzzle[1] + d[1] * 3.0, muzzle[2] + d[2] * 3.0)
