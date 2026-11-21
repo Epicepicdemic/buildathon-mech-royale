@@ -158,7 +158,8 @@ class Tactics:
                 and math.hypot(self.hold_goal[0] - cx, self.hold_goal[1] - cy) <= rs:
             return self.hold_goal
         threats = self.th.threat_points(me, 20.0)
-        n = P.choose_hold(self.w, me.xy, (cx, cy, max(2.0, rs - 4.0)), threats, self.rng)
+        drones = [tr.home for tr in self.th.npcs() if tr.home is not None]
+        n = P.choose_hold(self.w, me.xy, (cx, cy, max(2.0, rs - 4.0)), threats, self.rng, drones=drones)
         if n is None:
             n = self.w.nearest_free(cx, cy, 30)
         self.hold_goal = self.w.node_xy(n) if n is not None else (cx, cy)

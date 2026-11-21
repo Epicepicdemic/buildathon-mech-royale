@@ -169,6 +169,7 @@ class World:
         can = 0.0
         seg = L / n
         nu = self.nu
+        nv = self.nv
         res = self.res
         for k in range(k0, k1 + 1):
             t = k * inv
@@ -182,7 +183,13 @@ class World:
             if sd[j * nx + i] > z * 10.0:
                 return False
             if canopy:
-                m = int((y - y0) / res + 0.5) * nu + int((x - x0) / res + 0.5)
+                cu = int((x - x0) / res + 0.5)
+                cv = int((y - y0) / res + 0.5)
+                if cu >= nu:
+                    cu = nu - 1
+                if cv >= nv:
+                    cv = nv - 1
+                m = cv * nu + cu
                 hi = self.can_hi[m]
                 if hi and self.can_lo[m] <= z * 10.0 <= hi:
                     can += seg

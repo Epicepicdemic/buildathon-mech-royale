@@ -212,10 +212,13 @@ class Follower:
         last = len(pts) - 1
         j = min(last, self.i + self.LOOKAHEAD)
         w = self.w
+        probes = 0
         while j > self.i + 1:
-            if w.walkable(x, y, pts[j][0], pts[j][1], need=2.7, skip_start=1.0):
+            # bounded: at most 7 straight-walk probes, sampled every 0.75 m on the 1 m tables
+            if w.walkable(x, y, pts[j][0], pts[j][1], need=2.7, step=0.75, skip_start=1.0):
                 break
-            j -= 1
+            probes += 1
+            j -= 2 if probes < 7 else (j - self.i - 1)
         if j <= self.i:
             j = min(last, self.i + 1)
         self.last_target = j
