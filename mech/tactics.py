@@ -175,7 +175,7 @@ class Tactics:
 
     def _isolate(self, me, dec, enemies):
         """Two or more mechs with a line of fire on us from bearings more than 60 degrees apart:
-        walk to the nearest spot (within 45 m) hidden from all of them but one, and fight that one."""
+        walk to the nearest spot (within 30 m) hidden from all of them but one, and fight that one."""
         t = me.t
         sh = self.shooters(me)
         if len(sh) < 2:
@@ -197,7 +197,8 @@ class Tactics:
         if key != self.iso_key or (self.iso is None and self.iso_search is None and t - self.iso_t > 1.0):
             start = self.w.nearest_free(me.pos[0], me.pos[1], 5)
             if start is not None:
-                self.iso_search = IsolateSearch(self.w, start, (pc[0], pc[1], pc[2] + 4.5), eyes, height=me.height)
+                self.iso_search = IsolateSearch(self.w, start, (pc[0], pc[1], pc[2] + 4.5), eyes, max_cost=30.0,
+                                                height=me.height)
                 self.iso_key = key
                 self.iso_t = t
                 self.iso = None
@@ -425,7 +426,28 @@ class Tactics:
         dec = self._decide(me, obs)
         self._return_fire(me, dec)
         self._reload_discipline(me, dec)
+        self._reload_cover(me, dec)
         return dec
+
+    def _reload_cover(self, me, dec):
+        """Reloading (2.4 s without the gun) while something has a line of fire on us: step behind
+        the nearest cover if it is a few strides away, then come back out. (Squad trace, seed 4:
+        version 3 lost a 50 m duel by seven hits, taking 760 HP during two reloads in the open.)"""
+        gun = me.by_kind.get("gun")
+        if gun is None or not (gun.reload > 0 or gun.ammo == 0) or len(me.weapons) > 1:
+            return
+        if not self.shooters(me):
+            return
+        hide = self.cov.hide_xy()
+        if hide is None or math.hypot(hide[0] - me.pos[0], hide[1] - me.pos[1]) > 18.0:
+            return
+        self.mv.go(hide, me, self.zone, prefer_cover=False, tag="reload-cover", replan_dist=3.0)
+        dec.direct = None
+        dec.hold = False
+        dec.speed = "boost" if me.energy > 20 else "walk"
+        if dec.intent is not None:
+            dec.intent.label = "reload: cover"
+        dec.label = "reload: cover"
 
     def _reload_discipline(self, me, dec):
         """A reload is 2.4 s without the gun. Start one early only when nothing could make us pay for

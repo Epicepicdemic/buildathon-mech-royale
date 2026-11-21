@@ -129,6 +129,34 @@ class TargetChoiceTests(unittest.TestCase):
         self.assertLess(angdiff(acts[-1]["aim"][0], 0.0), 0.25)      # torso on the near attacker (east)
 
 
+class ReloadTests(unittest.TestCase):
+    def test_reloads_behind_cover_when_it_is_close(self):
+        """Squad seed 4: two 2.4 s reloads in the open cost a 50 m duel. With the magazine empty and
+        an attacker on us, the bot steps to cover a few strides away."""
+        from tests.helpers import weapon
+        w = world()
+        bot = Bot(hello(), world=w)
+        bot.tactics.opening_done = True
+        me = (-135.0, -166.0)                   # 7 m from a cell hidden from the attacker
+        ex, ey = -146.4, -214.7                 # 50 m away with a clear line of fire
+        labels = []
+        yaw_to = math.atan2(ey - me[1], ex - me[0])
+        aim = [yaw_to, 0.0]
+        for k in range(20):
+            obs = zone_obs(self_obs(pos=(me[0], me[1], w.floor(*me)), t=120.0 + 0.1 * k, aim=aim,
+                                    weapons=[weapon("gun", ammo=0, reload=2.0), None]))
+            obs["mechs"] = [enemy(9, ex, ey, w, yaw_to + math.pi)]
+            if k % 3 == 0:
+                obs["events"] = [{"type": "damaged", "amount": 45, "weapon": "gun", "bearing": yaw_to, "by": 9}]
+            a = bot.act(obs)
+            aim = a["aim"]
+            labels.append(a.get("debug", {}).get("label", labels[-1] if labels else ""))
+        hide = bot.cover.hide_xy()
+        self.assertIsNotNone(hide)
+        self.assertLessEqual(math.hypot(hide[0] - me[0], hide[1] - me[1]), 18.0)
+        self.assertTrue(any(l.startswith("reload: cover") for l in labels), labels)
+
+
 class SquadTests(unittest.TestCase):
     """The red team's squad spreads round us so one bot is always behind whatever we face: fight
     them one at a time from a spot hidden from all of them but one."""
