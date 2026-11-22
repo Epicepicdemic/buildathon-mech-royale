@@ -3,5 +3,9 @@
   "cr_energy": 1,
   "cr_silent": 1,
   "cr_heal": 1,
-  "cr_hunt": 1
+  "cr_hunt": 1,
+  "cr_hunt_hp": 0.65,
+  "cr_hunt_cubes": 2,
+  "cr_hunt_energy": 25.0,
+  "finish_on": 1
 }
