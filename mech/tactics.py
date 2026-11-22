@@ -45,6 +45,12 @@ HUNT_AIM_S = 1.0        # ... this long is hunting us (in squad replays the hunt
 HUNT_MEMORY_S = 10.0    # ... and counts as hunting this long after (or after it last hit us)
 
 
+REENG_MIN_M = 15.0          # reengage: the new spot is at least this far from where we traded ...
+REENG_MAX_COST = 34.0       # ... and within this path cost (about 30 m)
+REENG_S = 3.5               # give up on reaching it after this long
+REENG_EVERY_S = 7.0         # at most one reposition per this long
+REENG_ENERGY = 30.0         # boost there only above this energy (a reserve for the next fight)
+
 class GearHold:
     """gear_first is on this decision; `hunter` is the nearest mech hunting us, or None."""
     __slots__ = ("hunter",)
@@ -109,6 +115,12 @@ class Tactics:
         self.cov = cover
         self.iso = CoverState(world, random.Random(seed + 7))   # lose_isolate: hidden from all but the target
         self.isolating = False
+        self.reeng = CoverState(world, random.Random(seed + 11))  # reengage: a fresh angle after a hit trade
+        self.reengaging = False
+        self.reeng_until = -1e9         # moving to the new spot until then
+        self.reeng_next = -1e9          # no new reposition before then
+        self.reeng_from = None
+        self.reeng_id = None
         self.prev_target_id = None      # sticky_target
         self.th = threats
         self.zone = zone
@@ -772,8 +784,17 @@ class Tactics:
         iso = self.iso.hide_xy() if self.isolating and play in (D.CORNER, D.ASSAULT) else None
         if iso is not None and not 2.5 < math.hypot(iso[0] - me.pos[0], iso[1] - me.pos[1]) <= SS.get("isolate_m") + 6.0:
             iso = None
+        reeng = self._reengage(me, play, target, calc, enemies, slack) if gear is None and iso is None else None
         if gear is not None:
             self._gear(me, obs, dec, gear, slack)
+        elif reeng is not None:
+            # reengage: off the line it just traded on, to a spot it has not seen, then fight again
+            self.mv.go(reeng, me, z, prefer_cover=False, tag="reengage", replan_dist=2.5)
+            dec.speed = "boost" if me.energy > REENG_ENERGY else "walk"
+            dec.evasive = True
+            intent.fire = "long"
+            intent.no_laser_start = True
+            intent.label = "reengage"
         elif iso is not None:
             # lose_isolate: boost to the cell only the target sees, the gun firing on the way
             self.mv.go(iso, me, z, prefer_cover=False, tag="isolate", replan_dist=2.5)
@@ -1062,6 +1083,54 @@ class Tactics:
             dec.face = self.lookout_yaw(me)
             dec.hold = True
 
+    def _reengage(self, me, play, target, calc, enemies, slack):
+        """reengage (step 3): after a hit trade (it hit us and we hit it in the last 1.5 s) while our
+        big shot recovers (laser cooldown, or gun reload without a laser), step 15-30 m to a cell
+        hidden from everywhere the target stood in the last 5 s, then let the duel resume from
+        there (a new angle: the peek search starts from the new cell). Returns the goal or None."""
+        self.reengaging = False
+        if not PF.on("reengage") or target is None or play not in (D.CORNER, D.ASSAULT, D.HARASS):
+            return None
+        t = me.t
+        tr = target
+        if t < self.reeng_until and self.reeng_id == tr.id:
+            hx = self.reeng.hide_xy()
+            self.reengaging = True
+            if hx is None:
+                return None
+            d = math.hypot(hx[0] - me.pos[0], hx[1] - me.pos[1])
+            if d < 2.5:
+                self.reeng_until = t        # arrived: the duel resumes from here
+                self.cov.reset()
+                return None
+            return hx
+        if t < self.reeng_next or slack < 15.0 or not me.in_zone:
+            return None
+        laser = me.by_kind.get("laser")
+        gun = me.by_kind.get("gun")
+        recovering = (laser is not None and laser.cooldown > 0.8) or \
+            (laser is None and gun is not None and gun.reload > 0.6)
+        traded = t - tr.t_hit_us <= 1.5 and t - tr.t_we_hit <= 1.5
+        finishing = tr.hp_frac() < 0.3 or (calc is not None and getattr(calc, "ratio", 1.0) >= 2.5)
+        others = sum(1 for e in enemies if e is not tr and (e.sees_us or t - e.t_hit_us <= 3.0))
+        if not (recovering and traded) or finishing or others >= 2:
+            return None
+        watch = [(h[1], h[2], tr.pos[2] + 8.0) for h in tr.hist if t - h[0] <= 5.0][::5]
+        p = tr.est_pos(t)
+        watch.append((p[0], p[1], p[2] + 8.0))
+        for e in enemies:
+            if e is not tr and (e.sees_us or e.los):
+                q = e.est_pos(t)
+                watch.append((q[0], q[1], q[2] + 8.0))
+        self.reeng.reset()
+        self.reeng.want_hide(me, watch, t, max_cost=REENG_MAX_COST, away_from=(me.pos[0], me.pos[1]), min_dist=REENG_MIN_M)
+        self.reeng_until = t + REENG_S
+        self.reeng_next = t + REENG_EVERY_S
+        self.reeng_id = tr.id
+        self.reeng_from = (me.pos[0], me.pos[1])
+        self.reengaging = True
+        return None
+
     # ------------------------------------------------------------------ counters
     def _counter_laser(self, me, dec, lt, enemies):
         """Enemy charging a laser toward us: inside lightning range short it; if 1-step cover is
@@ -1276,6 +1345,23 @@ class Tactics:
                     self.air = A.PopUp()
                     self.air.start(t, rise)
                     self.air_ban_until = t + 6.0
+                    intent.fire = "long"
+                    intent.spot = "peek"
+                    return True
+        # 4. gun_popup: jet-peek over low cover with the gun (no laser ready), nobody watching us
+        gun = me.by_kind.get("gun")
+        if PF.on("gun_popup") and gun is not None and target is not None and (laser is None or laser.cooldown > 0.5) \
+                and play in (D.ASSAULT, D.CORNER, D.HARASS) and not target.los \
+                and not any(e.sees_us for e in enemies) and t - target.t_seen < 3.0 \
+                and gun.reload <= 0 and (gun.ammo is None or gun.ammo >= 5):
+            tp = target.est_pos(t)
+            d = math.hypot(tp[0] - me.pos[0], tp[1] - me.pos[1])
+            if 35.0 <= d <= 150.0:
+                rise = A.GunPop.find(w, me, (tp[0], tp[1], tp[2] + 4.5), A.GunPop.MAX_RISE, mech_cfg)
+                if rise is not None:
+                    self.air = A.GunPop()
+                    self.air.start(t, rise)
+                    self.air_ban_until = t + 7.0
                     intent.fire = "long"
                     intent.spot = "peek"
                     return True

@@ -19,6 +19,9 @@ GUN_LEAD_RAD = 0.12         # gun_during_charge: the gun fires while the laser c
                             # lead is this close to the laser's line (the torso never leaves it)
 AIR_LONG_M = 165.0          # airborne_aim: long bursts at an airborne mech to this range ...
 AIR_FALL_VZ = 6.0           # ... and gravity in the lead while it climbs slower than this
+LASER_LAT = 0.05            # laser_aim: one tick from the decision to the beam
+LASER_HOLD_S = 2.0          # laser_hold: keep a charge on a dropped target this long
+ACC_MAX = 80.0              # accel_lead: estimated target acceleration is clipped to this (m/s^2)
 
 
 class Target:
@@ -55,6 +58,7 @@ class Gunner:
         self.shots = 0
         self.short_until = -1e9          # lightning short effect: no laser charging
         self.laser_hold_since = None
+        self.laser_tgt, self.laser_tgt_t = None, -1e9
         self.debug = ""
         lat = (cfg.get("match") or {})
         self.dt = float(lat.get("decide_every", 2)) / float(lat.get("tick_hz", 20))
@@ -106,6 +110,20 @@ class Gunner:
             if dist > bal.reversal_range(speed) and tr.dodging() and hasattr(tr, "mean_vel"):
                 mv = tr.mean_vel(0.75)
                 tvel = (0.48 * tvel[0] + 0.52 * mv[0], 0.48 * tvel[1] + 0.52 * mv[1], tvel[2])
+        acc = self._target_acc(tgt, tvel is tgt.vel)
+        if acc is not None:
+            vmax = max(float((self.cfg.get("mech") or {}).get("walk_speed", 11.7)), math.hypot(tvel[0], tvel[1]))
+            g, zmin = 0.0, None
+            if air and tvel[2] < AIR_FALL_VZ:
+                g = float((self.cfg.get("mech") or {}).get("gravity", 22.0))
+                ground = getattr(tr, "ground", None)
+                zmin = ground + tgt.height * 0.5 if ground is not None else None
+            sol = bal.lead_accel(me.muzzle, tgt.center(), tvel, acc, speed, latency=0.05, ovel=me.vel,
+                                 vmax=vmax, g=g, zmin=zmin)
+            ta = bal.time_to_align(me.yaw, me.pitch, sol[0], sol[1], me.turn_rate, me.pitch_rate)
+            yaw, pitch, tf, aimp = bal.lead_accel(me.muzzle, tgt.center(), tvel, acc, speed, latency=0.05 + min(ta, 0.5),
+                                                  ovel=me.vel, vmax=vmax, g=g, zmin=zmin)
+            return yaw, clamp(pitch, me.min_pitch, me.max_pitch), tf, aimp
         if air and tvel[2] < AIR_FALL_VZ:
             ground = getattr(tr, "ground", None)
             yaw0, pitch0, _, _ = self._fall_lead(me, tgt, tvel, speed, 0.05, ground)
@@ -117,6 +135,47 @@ class Gunner:
         ta = bal.time_to_align(me.yaw, me.pitch, yaw0, pitch0, me.turn_rate, me.pitch_rate)
         yaw, pitch, tf, aimp = bal.lead(me.muzzle, tgt.center(), tvel, speed, latency=0.05 + min(ta, 0.5), ovel=me.vel)
         return yaw, clamp(pitch, me.min_pitch, me.max_pitch), tf, aimp
+
+    def _target_acc(self, tgt, raw_vel=True):
+        """accel_lead: the track's measured horizontal acceleration, or None (off, no track, or a
+        weave-damped velocity is in use)."""
+        tr = tgt.track
+        if not PF.on("accel_lead") or tr is None or not raw_vel or not hasattr(tr, "accel"):
+            return None
+        ax, ay = tr.accel()
+        a = math.hypot(ax, ay)
+        if a < 2.0:
+            return None
+        if a > ACC_MAX:
+            ax, ay = ax * ACC_MAX / a, ay * ACC_MAX / a
+        return (ax, ay)
+
+    def _laser_aim(self, me, tgt):
+        """laser_aim: the beam leaves on the first tick after this decision (0.05 s), from where our
+        muzzle will be then, at where the target will be then (its acceleration included)."""
+        lat = LASER_LAT
+        acc = self._target_acc(tgt) or (0.0, 0.0)
+        vmax = max(float((self.cfg.get("mech") or {}).get("walk_speed", 11.7)), math.hypot(tgt.vel[0], tgt.vel[1]))
+        g = float((self.cfg.get("mech") or {}).get("gravity", 22.0)) if self._airborne(tgt) and tgt.vel[2] < AIR_FALL_VZ else 0.0
+        p = bal.predict(tgt.center(), tgt.vel, acc, lat, vmax, g=g)
+        m = me.muzzle
+        ox, oy = m[0] + me.vel[0] * lat, m[1] + me.vel[1] * lat
+        yaw, pitch = bal.aim_angles(p[0] - ox, p[1] - oy, p[2] - m[2])
+        return yaw, clamp(pitch, me.min_pitch, me.max_pitch), p
+
+    def _clear_part(self, me, tgt, aim, aimp):
+        """clear_aim: (aim, line_ok). Keeps the aim when the muzzle-to-lead-point line is clear;
+        else re-aims at the head (0.8 of the height) or the legs (0.2), whichever line is clear;
+        else line_ok is False (the shot would end in the wall)."""
+        if self._clear_line(me, aimp):
+            return aim, True
+        m = me.muzzle
+        for frac in (0.3, -0.3):
+            q = (aimp[0], aimp[1], aimp[2] + tgt.height * frac)
+            if self._clear_line(me, q):
+                yaw, pitch = bal.aim_angles(q[0] - m[0], q[1] - m[1], q[2] - m[2])
+                return [yaw, clamp(pitch, me.min_pitch, me.max_pitch)], True
+        return aim, False
 
     def _direct_aim(self, me, tgt, latency=0.05):
         c = tgt.center()
@@ -205,7 +264,10 @@ class Gunner:
             laser_active = laser is not None and laser.charge > 0
             gun_sol = None
             if laser_active:
-                yaw, pitch, aimp = self._direct_aim(me, tgt, latency=self.dt)
+                if PF.on("laser_aim"):
+                    yaw, pitch, aimp = self._laser_aim(me, tgt)
+                else:
+                    yaw, pitch, aimp = self._direct_aim(me, tgt, latency=self.dt)
                 full = laser.stat("charge", 0.75)
                 aim = [yaw, pitch]
                 if gun is not None and PF.on("gun_during_charge"):
@@ -215,6 +277,15 @@ class Gunner:
                     gs = self._gun_aim(me, tgt, gun)
                     if angdiff(gs[0], yaw) <= GUN_LEAD_RAD and abs(gs[1] - pitch) <= GUN_LEAD_RAD:
                         gun_sol = gs
+                if PF.on("clear_aim") and self.w is not None and not self._clear_line(me, aimp):
+                    # the beam hits anywhere on the body: put it on the part the line reaches
+                    aim, ok = self._clear_part(me, tgt, aim, aimp)
+                    if ok:
+                        yaw, pitch = aim
+                        m = me.muzzle
+                        k = math.dist(m, aimp)
+                        aimp = (m[0] + math.cos(pitch) * math.cos(yaw) * k, m[1] + math.cos(pitch) * math.sin(yaw) * k,
+                                m[2] + math.sin(pitch) * k)
                 sy, sp = self._slewed(me, yaw, pitch, 0.05)
                 on = bal.on_target(sy, sp, yaw, pitch, cdist, tgt.radius, tgt.height / 2, 0.7)
                 clear = tgt.visible and self._clear_line(me, aimp)
@@ -240,6 +311,11 @@ class Gunner:
             else:
                 yaw, pitch, aimp = self._direct_aim(me, tgt)
                 aim = [yaw, pitch]
+            gun_line = True
+            if PF.on("clear_aim") and gun is not None and not laser_active and self.w is not None:
+                # the bullet goes to the lead point, not to where the target is now: aim at a part of
+                # it the line reaches (centre, else head, else legs), or hold the gun
+                aim, gun_line = self._clear_part(me, tgt, aim, aimp)
             yaw, pitch = aim
             sy, sp = self._slewed(me, yaw, pitch, 0.05)
             on = bal.on_target(sy, sp, yaw, pitch, cdist, tgt.radius, tgt.height / 2, 0.78)
@@ -254,7 +330,7 @@ class Gunner:
                     # the gun's own test while the laser charges: the torso within tolerance of the lead
                     gsy, gsp = self._slewed(me, aim[0], aim[1], 0.05)
                     on = bal.on_target(gsy, gsp, gun_sol[0], gun_sol[1], cdist, tgt.radius, tgt.height / 2, 0.78)
-                if g_ok and on and clear:
+                if g_ok and on and clear and gun_line:
                     rr = bal.reversal_range(gun.stat("speed", 252.0))
                     tr = tgt.track
                     # Full bursts inside max(rr, 95 m) or whenever target is not actively dodging;
@@ -307,6 +383,10 @@ class Gunner:
                         aim = [myaw, mpitch]
                         if abs(wrap(me.yaw - myaw)) < 0.02 and abs(me.pitch - mpitch) < 0.02:
                             fire[mortar.slot] = True
+        if tgt is not None and laser is not None and laser.charge > 0:
+            self.laser_tgt, self.laser_tgt_t = tgt, t
+        if aim is None and laser is not None and laser.charge > 0 and not no_laser_start and PF.on("laser_hold"):
+            aim = self._laser_hold(me, laser, fire, info)
         if aim is None:
             yaw = face_yaw if face_yaw is not None else (move_yaw if move_yaw is not None else me.yaw)
             aim = [yaw, 0.0]
@@ -325,6 +405,31 @@ class Gunner:
         aim[1] = clamp(aim[1], me.min_pitch, me.max_pitch)
         self.debug = info
         return aim, fire, reload, info
+
+    def _laser_hold(self, me, laser, fire, info):
+        """laser_hold: the decision dropped the target mid-charge (no target, or no fire intent).
+        Letting go would fire the charge along whatever the torso faces; instead keep the beam on
+        the last target's estimated position for up to LASER_HOLD_S and release when it is on and
+        clear (it came back), else keep holding (the 2 s hold auto-fires on that line at worst)."""
+        lt = getattr(self, "laser_tgt", None)
+        t = me.t
+        if lt is None or lt.track is None or t - self.laser_tgt_t > LASER_HOLD_S or getattr(lt.track, "dead", False):
+            return None
+        tr = lt.track
+        cube_sz = float((self.cfg.get("cubes") or {}).get("size_per_cube", 0.05))
+        tg = Target.from_track(tr, t, cube_sz) if hasattr(tr, "est_pos") else lt
+        yaw, pitch, aimp = self._laser_aim(me, tg)
+        cdist = math.dist(me.muzzle, tg.center())
+        sy, sp = self._slewed(me, yaw, pitch, 0.05)
+        on = bal.on_target(sy, sp, yaw, pitch, cdist, tg.radius, tg.height / 2, 0.7)
+        clear = bool(getattr(tr, "los", False)) and self._clear_line(me, aimp)
+        full = laser.stat("charge", 0.75)
+        release = on and clear and laser.charge >= 0.4 * full
+        fire[laser.slot] = not release
+        if release:
+            self.laser_hold_since = None
+        info["laser"] = "hold-release" if release else "hold"
+        return [yaw, pitch]
 
     def mortar_aim(self, me, mortar, tgt):
         v = mortar.stat("speed", 72.0)

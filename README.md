@@ -107,8 +107,11 @@ Not included: the wall back-off of candidate 1.
 ### Switchboard (`mech/squad_settings.py`)
 
 Every number that shapes squad-mode play is a knob in `mech/squad_settings.py`. The defaults are B2's
-values, so the default build plays exactly like 8d7d9cb: replaying five recorded streams (9,615
-decisions, three squad matches, two free-for-alls) gives identical actions (`tools/replay_actions.py`).
+values. On the switchboard commit itself (780bef0) the default build plays exactly like 8d7d9cb:
+replaying five recorded streams (9,615 decisions, three squad matches, two free-for-alls) gives
+identical actions (`tools/replay_actions.py`). This branch adds the aim pieces below, which change
+play in both modes, so its actions no longer match 8d7d9cb; the switchboard file and its defaults
+are unchanged.
 A variant is `mech/squad_settings.json`, written and committed by `tools/variant.py key=value ...`. An
 unknown key or a wrong type stops the bot at start. Free-for-all play reads none of the knobs
 (`tests/test_switchboard.py`), and the mode detector's thresholds are not knobs.
@@ -126,8 +129,8 @@ is also every match's first 35 s, before the squad detector can decide) reads
 
 **This commit switches on:** `gear`, `energy`, `silent` and `heal` in both modes (`silent` acts only in
 free-for-all mode), through `mech/cleanroom_settings.json` and `mech/squad_settings.json`; `cells` and `home` are
-off. Sandbox, 40 seeds paired with 780bef0: free-for-all +1.10 +- 0.68 places, squad +0.10 +- 0.41 (survival
-+45 +- 10 s).
+off. It also carries the aim branch (`aim-sb`, below), merged on top. Sandbox numbers for this merge are in
+our progress notes.
 
 - `gear`: a mech is fought only when it is a real threat or an easy kill: within 60 m (70 m in
   squad mode) in sight, it hit us in the last 4 s, it is charging a laser at us, it held its torso on
@@ -147,6 +150,39 @@ off. Sandbox, 40 seeds paired with 780bef0: free-for-all +1.10 +- 0.68 places, s
   holders, inside the zone, on a strafe side that flips every 1.2-3 s.
 - `home` (free-for-all only): the hold cell between fights is costed against every mech seen in the
   last 45 s, keeps clear of announced supply-drop landings, and is kept 30 s.
+
+## Aim pieces (both modes, switches in `mech/profile.py`, tests in `tests/test_aim.py`)
+
+Three are on:
+
+- `clear_aim`: the gun fires only when the line from the muzzle to the lead point is clear of
+  buildings and terrain. If it is not, the gun aims at the target's head (0.8 of its height) or legs
+  (0.2), whichever line is clear, and holds fire if neither is. A charging laser does the same before
+  its release. Before this, the gun fired whenever the centre or the head line was clear but always
+  aimed at the centre, so a target behind a low wall drew shots into the wall.
+- `laser_aim`: the laser aims one tick (0.05 s) ahead, from where our muzzle will be then, at where
+  the target will be then. It used to aim 0.1 s ahead from where the muzzle is now.
+- `laser_hold`: when the decision drops the target while the laser is charging, the beam stays on
+  that target's estimated position for up to 2 s and is released once the target is back on aim, in
+  a clear line, with at least 40% of the charge. The charge used to fire along wherever the torso
+  was facing. It does not hold while we retreat at full speed (charging halves our speed).
+
+Three are in the code but switched off, because they measured worse or no better (20 sandbox seeds
+per mode, each piece on alone, against 6e8634f):
+
+- `reengage` (movement): after a hit trade while the laser recovers or the gun reloads, move 15-30 m
+  to a cell hidden from everywhere the target stood in the last 5 s. Place got worse in squad
+  (+1.60) and in free-for-all (+0.85).
+- `gun_popup` (movement): with no laser ready and nobody watching us, a target behind cover 35-150 m
+  away is peeked with the gun: jet up until our eye clears the cover (at most 8 m), cut the jets and
+  fall while the gun fires (no hovering), only with 35 energy left after the climb. Place got worse in
+  free-for-all (+1.20) and in squad (+0.90).
+- `accel_lead` (gun lead, not movement): lead with the target's measured acceleration, with its
+  speed capped and a braking target predicted to stop. No gain in hit rate against accelerating
+  targets.
+
+`MECH_PROFILE="name=0,other=1"` overrides these switches, for sandbox experiments only; the match
+container sets nothing.
 
 ## Build and check
 

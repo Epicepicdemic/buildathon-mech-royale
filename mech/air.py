@@ -189,6 +189,45 @@ class PopUp(AirPlay):
         return self.base_z is not None and me.pos[2] - self.base_z >= self.target - 0.6
 
 
+class GunPop(PopUp):
+    """gun_popup: jet-peek over low cover with the gun. Jet until the eye clears the cover by a
+    metre, cut the jets and fall: the gun fires on the way up and down, no hovering. Only for low
+    cover (MAX_RISE) and with an energy reserve left after the climb (RESERVE)."""
+    name = "gunpop"
+    MAX_RISE = 8.0
+    RESERVE = 35.0
+
+    @staticmethod
+    def find(world, me, target_center, max_rise=MAX_RISE, cfg_mech=None):
+        x, y, z = me.pos
+        eye = me.eye_h
+        for rise in range(0, int(max_rise) + 1):
+            ez = z + eye + rise
+            if world.line_clear(x, y, ez, target_center[0], target_center[1], target_center[2]):
+                if rise == 0:
+                    return None
+                if me.energy < climb_energy(rise + 1.0, cfg_mech, margin=GunPop.RESERVE):
+                    return None
+                return rise + 1.0
+        return None
+
+    def start(self, t, target):
+        super().start(t, target)
+        self.cut = False
+
+    def step(self, me, laser_released=False):
+        if self.base_z is None:
+            self.base_z = me.pos[2]
+        up = me.pos[2] - self.base_z
+        if self.cut or up >= self.target or (self.t0 is not None and me.t - self.t0 > 2.0):
+            self.cut = True
+            self.done = me.grounded and (self.t0 is None or me.t - self.t0 > 0.3)
+            return [0.0, 0.0], False, False, self.done
+        if me.grounded and up < 0.5:
+            return [0.0, 0.0], False, True, False
+        return [0.0, 0.0], me.energy > 1.0, False, False
+
+
 class RoofEdge(AirPlay):
     """On a roof: a spot at the edge with a shot at the target, and one a step back that hides us."""
     name = "roofedge"
