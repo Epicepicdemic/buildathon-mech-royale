@@ -128,6 +128,25 @@ class Track:
         inv = 1.0 / len(sub)
         return (sum(e[3] for e in sub) * inv, sum(e[4] for e in sub) * inv, self.vel[2])
 
+    def accel(self, span=0.2, max_gap=0.35):
+        """Horizontal acceleration (ax, ay) from the observed velocities ~`span` s apart; zero when
+        the history is too short or has a gap (a re-acquired track)."""
+        h = self.hist
+        if len(h) < 2 or not self.in_obs:
+            return (0.0, 0.0)
+        b = h[-1]
+        a = None
+        for e in reversed(h[:-1]):
+            if b[0] - e[0] > max_gap:
+                break
+            a = e
+            if b[0] - e[0] >= span - 1e-6:
+                break
+        if a is None or b[0] - a[0] < 0.05:
+            return (0.0, 0.0)
+        dt = b[0] - a[0]
+        return ((b[3] - a[3]) / dt, (b[4] - a[4]) / dt)
+
     def still(self):
         return math.hypot(self.vel[0], self.vel[1]) < 1.5
 

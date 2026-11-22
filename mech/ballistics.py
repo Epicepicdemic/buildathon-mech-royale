@@ -118,3 +118,57 @@ def reversal_range(speed, accel=58.5, walk=11.7, radius=2.5):
     if t > t_rev:
         t = t_rev + (radius - accel * t_rev ** 2 / 2) / (2 * walk)
     return speed * t + SHOT_OFFSET
+
+
+def predict(pos, vel, acc, T, vmax, steps=6, g=0.0, zmin=None, stop=True):
+    """Position after T s of constant horizontal acceleration `acc` from `vel`, the horizontal
+    speed capped at `vmax` (a mech's legs saturate: 58.5 m/s^2 reaches walk speed in 0.2 s), and
+    gravity `g` on z down to `zmin`. With `stop`, a braking target (acceleration against its
+    velocity) is predicted to stop, not to reverse: a stop and a reversal look the same until
+    the velocity crosses zero, and the stop is the smaller bet."""
+    if T <= 0:
+        return tuple(pos)
+    x, y, z = pos
+    vx, vy, vz = vel
+    ax, ay = acc[0], acc[1]
+    h = T / steps
+    cap = max(vmax, math.hypot(vx, vy))
+    v0x, v0y = vx, vy
+    braking = stop and (ax * v0x + ay * v0y) < 0
+    for _ in range(steps):
+        nvx, nvy = vx + ax * h, vy + ay * h
+        s = math.hypot(nvx, nvy)
+        if s > cap:
+            nvx, nvy = nvx * cap / s, nvy * cap / s
+        if braking and nvx * v0x + nvy * v0y <= 0:
+            # drop the component along the original direction; keep any sideways part
+            n2 = v0x * v0x + v0y * v0y
+            k = (nvx * v0x + nvy * v0y) / n2 if n2 > 1e-9 else 0.0
+            nvx, nvy = nvx - k * v0x, nvy - k * v0y
+            ax = ay = 0.0
+        x += 0.5 * (vx + nvx) * h
+        y += 0.5 * (vy + nvy) * h
+        nvz = vz - g * h
+        z += 0.5 * (vz + nvz) * h
+        vx, vy, vz = nvx, nvy, nvz
+    if zmin is not None:
+        z = max(z, zmin)
+    return (x, y, z)
+
+
+def lead_accel(origin, target, tvel, tacc, speed, latency=0.05, ovel=None, vmax=11.7, offset=SHOT_OFFSET,
+               iters=4, g=0.0, zmin=None):
+    """bal.lead with a constant-acceleration, speed-capped target path (and optional gravity)."""
+    ox, oy, oz = origin
+    if ovel is not None:
+        ox += ovel[0] * latency
+        oy += ovel[1] * latency
+    t = 0.0
+    q = target
+    for _ in range(iters):
+        q = predict(target, tvel, tacc, latency + t, vmax, g=g, zmin=zmin)
+        d = math.sqrt((q[0] - ox) ** 2 + (q[1] - oy) ** 2 + (q[2] - oz) ** 2)
+        t = max(0.0, d - offset) / speed
+    q = predict(target, tvel, tacc, latency + t, vmax, g=g, zmin=zmin)
+    yaw, pitch = aim_angles(q[0] - ox, q[1] - oy, q[2] - oz)
+    return yaw, pitch, t, q
