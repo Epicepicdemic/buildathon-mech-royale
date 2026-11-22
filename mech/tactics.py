@@ -18,6 +18,7 @@ from .cover import CoverState
 from .gunner import Target
 from .loot import LootMemory
 from . import profile as PF
+from . import brawler as BR
 
 WANTED_WEAPONS = ("laser", "lightning")     # laser first (kills happen at range), lightning second, never mortar
 LOSE_S = 1.5            # squad_no_break: clearly losing this long before a break stands
@@ -146,6 +147,8 @@ class Tactics:
         self.displace = None         # ((x, y), until): moving off a spot a mortar may be falling on
         self.mortar_jink_until = -1e9
         self.spawn = None
+        self.brawler = BR.Brawler(world)     # candidate D (mech/brawler.py), squad mode only
+        self.bmode = None
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -216,7 +219,87 @@ class Tactics:
                     self.iso.want_hide(me, pts, t, max_cost=ISOLATE_M)
         return play
 
+    def _brawl_choose(self, me, enemies, corner_ready, slack):
+        """Candidate D (mech/brawler.py), squad mode only: commit, attack or counter. Sets
+        self.bmode and returns the target track, or None to leave the ordinary plays in charge."""
+        br = self.brawler
+        t = me.t
+        self._note_hunters(me)
+        hunters = [e for e in enemies if not e.phantom and br.hunting(e, me, self._hunting)]
+        if slack < 4.0:
+            return None                         # the zone first
+        ct = br.commit_target(me, enemies, hunters, True)
+        if ct is not None:
+            e = ct[0]
+            if not (me.hp_frac < BR.COMMIT_QUIT_HP and e.hp_frac() > 0.5):
+                self.bmode = "commit"
+                return e
+        at = br.attack_target(me, enemies, hunters, True)
+        if at is not None:
+            self.bmode = "attack"
+            return at
+        h = br.counter_wanted(me, hunters, True)
+        if h is not None:
+            br.want_spot(me, self.watchers(me))
+            sp = br.spot
+            if sp is not None and math.hypot(sp[0] - me.pos[0], sp[1] - me.pos[1]) <= BR.AMBUSH_COST_M + 10.0:
+                self.bmode = "counter"
+                return h
+        return None
+
+    def _brawl_act(self, me, dec, intent, target, enemies, z, cube_sz):
+        """Movement and triggers for the brawler's three modes."""
+        t = me.t
+        p = target.est_pos(t)
+        d = math.hypot(p[0] - me.pos[0], p[1] - me.pos[1])
+        intent.target = target
+        intent.no_laser_start = False
+        if self.bmode == "commit":
+            # everything on the chain target: lightning on the nearest in the cone, gun on the same mech
+            if d > BR.COMMIT_WANT_M + 4.0:
+                self.mv.go((p[0], p[1]), me, z, prefer_cover=False, tag="brawl-commit", replan_dist=3.0)
+                dec.speed = "boost" if d > 38.0 and me.energy > 70.0 else "walk"
+            else:
+                self.mv.clear()
+                dec.speed = "walk"
+            dec.evasive = True
+            intent.fire = "long"
+            intent.reload_ok = me.by_kind.get("gun") is not None and me.by_kind["gun"].ammo == 0
+            intent.label = "brawl: commit %d" % d
+            dec.target = Target.from_track(target, t, cube_sz)
+        elif self.bmode == "attack":
+            # close through cover; arrive on its back when it is not looking at us
+            goal = (p[0], p[1]) if target.sees_us else D.rear_point(p, target.yaw, 20.0)
+            self.mv.go(goal, me, z, prefer_cover=d > 60.0, tag="brawl-attack", replan_dist=6.0)
+            dec.speed = "boost" if d > 70.0 and me.energy > BR.ATTACK_ENERGY + 20.0 else "walk"
+            dec.evasive = target.sees_us or target.los
+            intent.fire = "long" if target.los else "none"
+            intent.reload_ok = True
+            intent.label = "brawl: close %d" % d
+            if not target.los:
+                dec.target = None
+        else:
+            # counter: silent in the doorway until it walks into the arc
+            sp = self.brawler.spot
+            ds = math.hypot(sp[0] - me.pos[0], sp[1] - me.pos[1])
+            seen = target.sees_us or any(e.sees_us for e in enemies if not e.dead)
+            if ds > 2.0:
+                self.mv.go(sp, me, z, prefer_cover=False, tag="brawl-door", replan_dist=2.5)
+                dec.speed = "boost" if seen and me.energy > 50.0 else "walk"
+            else:
+                self.mv.clear()
+                dec.hold = True
+            dec.evasive = seen and ds > 2.0
+            intent.fire = "long" if seen and target.los else "none"
+            intent.reload_ok = True
+            intent.label = "brawl: door %d" % d
+            if intent.fire == "none":
+                dec.target = None
+            dec.face = bearing(me.pos, p)
+
     def _geared(self, me):
+        if self.mode.squad() and PF.on("brawl_loadout") and me.has("lightning"):
+            return True                     # candidate D: lightning in hand is the brawler's gear
         return me.cubes >= 10 or (me.has("laser") and me.cubes >= GEAR_CUBES)
 
     def _note_hunters(self, me):
@@ -497,15 +580,25 @@ class Tactics:
             return True
 
         # 1. Weapon pickups (live + remembered): laser first, lightning second, never mortar
+        # (brawl_loadout, squad mode: lightning first, a laser swapped out for it, the gun kept)
+        brawl = self.mode.squad() and PF.on("brawl_loadout")
+        first = "lightning" if brawl else "laser"
         for pid, (k, pp, _) in self.loot.pickups.items():
             if k not in WANTED_WEAPONS or k in kinds:
+                continue
+            if brawl and k == "laser" and "lightning" in kinds:
                 continue
             drop = None
             if not me.slots_free:
                 mort = me.by_kind.get("mortar")
                 light = me.by_kind.get("lightning")
+                las = me.by_kind.get("laser")
                 if mort is not None:
                     drop = mort.slot
+                elif brawl and k == "lightning" and las is not None:
+                    if las.charge > 0:
+                        continue
+                    drop = las.slot
                 elif light is not None and k == "laser":
                     if light.cooldown > 0.2:
                         continue
@@ -513,10 +606,10 @@ class Tactics:
                 else:
                     continue
             d = math.hypot(pp[0] - me.pos[0], pp[1] - me.pos[1])
-            max_d = (240.0 if k == "laser" else 160.0) if far else (145.0 if k == "laser" else 95.0)
+            max_d = (240.0 if k == first else 160.0) if far else (145.0 if k == first else 95.0)
             if d > max_d or abs(pp[2] - me.pos[2]) > 6.5 or not zone_ok(pp[0], pp[1]):
                 continue
-            d_eff = d * (0.38 if k == "laser" else 0.72)
+            d_eff = d * (0.38 if k == first else 0.72)
             in_reach = abs(pp[2] - me.pos[2]) <= 4.0 and d <= reach - 0.25 \
                 and any(p.get("id") == pid for p in (obs.get("pickups") or []))
             if best is None or d_eff < best[0]:
@@ -618,7 +711,12 @@ class Tactics:
         offer = obs.get("offer")
         if offer and offer.get("choices"):
             ch = offer["choices"]
-            dec.pick = max(range(len(ch)), key=lambda i: upgrade_score(me, ch[i].get("id")))
+            sq = self.mode.squad()
+
+            def _score(uid):
+                b = BR.brawl_upgrade_score(me, uid, sq)
+                return b if b is not None else upgrade_score(me, uid)
+            dec.pick = max(range(len(ch)), key=lambda i: _score(ch[i].get("id")))
 
         if th.kills > self.kills_seen:
             self.kills_seen = th.kills
@@ -636,6 +734,10 @@ class Tactics:
 
         self.mode.update(me, th, z)
         squad = self.mode.squad()
+        if squad:
+            self.brawler.note_seen(me, enemies)
+        # brawl_counter (squad): corner peeks never step out where a mech saw us in the last 5 s
+        self.cov.extra_avoid = self.brawler.burned(t) if squad and PF.on("brawl_counter") else ()
         target, calc = D.pick_target(
             lambda e: self.situation(me, e, [o for o in enemies if o is not e], corner_ready),
             enemies, t, me.xy, prev_id=self.prev_target_id, squad=squad,
@@ -650,6 +752,19 @@ class Tactics:
         if squad and PF.on("squad_no_break"):
             play = self._lose_rule(me, play, target, calc, enemies, sit, corner_ready)
         slack = self.mv.slack(me, z)
+        btarget = None
+        self.bmode = None
+        if squad:
+            btarget = self._brawl_choose(me, enemies, corner_ready, slack)
+            if btarget is not None:
+                target = btarget
+                self.prev_target_id = target.id
+                others = [o for o in enemies if o is not target and
+                          (o.sees_us or t - o.t_hit_us <= 3.0 or (o.los and self._dist(me, o) <= 110.0))]
+                sit = self.situation(me, target, others, corner_ready)
+                calc = D.FightCalc(sit, target)
+                play = D.ASSAULT if self.bmode in ("commit", "attack") else D.CORNER
+                gear = None
         dec.threat_yaw = self.danger_yaw(me)
         lt = self.laser_threat(me)
 
@@ -714,7 +829,7 @@ class Tactics:
             intent = D.Intent(D.REPOSITION, None)
             intent.label = "gear"
             dec.intent = intent
-        if gear is None and self._air(me, obs, dec, play, target, calc, enemies, slack):
+        if gear is None and self.bmode is None and self._air(me, obs, dec, play, target, calc, enemies, slack):
             dec.label = "air: " + self.air.name if self.air is not None else (intent.label or "")
             return dec
 
@@ -728,6 +843,8 @@ class Tactics:
             iso = None
         if gear is not None:
             self._gear(me, obs, dec, gear, slack)
+        elif self.bmode is not None:
+            self._brawl_act(me, dec, intent, target, enemies, z, cube_sz)
         elif iso is not None:
             # lose_isolate: boost to the cell only the target sees, the gun firing on the way
             self.mv.go(iso, me, z, prefer_cover=False, tag="isolate", replan_dist=2.5)
@@ -746,6 +863,12 @@ class Tactics:
             dec.evasive = intent.evasive
         elif play == D.CORNER:
             self.cov.want_hide(me, watchers, t, max_cost=65.0)
+            if squad and PF.on("brawl_counter"):
+                pk = self.cov.peek_xy()
+                if pk is not None and self.brawler.spot_burned(pk, t) and intent.spot == "peek" \
+                        and math.hypot(pk[0] - me.pos[0], pk[1] - me.pos[1]) > 3.0:
+                    self.cov.peek_used()    # brawl_counter: never re-peek where we were seen in 5 s
+                    intent.goal = self.cov.hide_xy()
             if target is not None:
                 self.cov.want_peek(Target.from_track(target, t, cube_sz).center(), t)
             if intent.spot == "hide" and self.prev_corner_spot == "peek":

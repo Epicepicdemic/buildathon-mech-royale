@@ -32,6 +32,12 @@ modes. Pieces switched off here are kept for the next candidates (round table 12
                        squad mode its gun counts a quarter for 2.2 s in the fight calculation
                        (house experts reload in the open 92% of the time; in a free-for-all that
                        would close us into the 45-78 m band where top teams kill most)
+    brawl_*            candidate D, squad mode only (mech/brawler.py): brawl_loadout (lightning
+                       before the laser, its upgrades first), brawl_commit (a hunter inside 45 m:
+                       everything on the chain target), brawl_attack (close through cover on an
+                       isolated or clustered hunter), brawl_counter (wait in a hidden doorway with a
+                       second exit, never where we were seen in the last 5 s), brawl_mortar (mortar
+                       holders first with a laser, else out of their lane)
 """
 import math
 
@@ -48,6 +54,11 @@ PROFILE = {
     "house_aim": True,
     "mortar_priority": True,
     "punish_reload": True,
+    "brawl_loadout": True,
+    "brawl_commit": True,
+    "brawl_attack": True,
+    "brawl_counter": True,
+    "brawl_mortar": True,
 }
 
 SQUAD_AFTER_S = 35.0        # no squad decision before this. The first death came by 29.9 s in all 67

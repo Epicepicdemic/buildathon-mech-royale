@@ -18,6 +18,7 @@ from .mover import Mover
 from .cover import CoverState
 from .gunner import Gunner
 from .tactics import Tactics
+from . import profile as PF
 
 WORK_BUDGET_S = 0.009       # searches stop after this much of the decision has passed
 NAME = "Wilce-B"
@@ -65,6 +66,8 @@ class Bot:
         self.cover.run(end - 0.0004)
         if self.tactics.isolating:
             self.tactics.iso.run(end - 0.0002)
+        if self.tactics.brawler.search is not None and time.perf_counter() < end:
+            self.tactics.brawler.run(end - 0.0002)
         for srch in (self.tactics.opening_search, self.tactics.second_search):
             if srch is not None and not srch.done and time.perf_counter() < end:
                 srch.run(end)
@@ -129,11 +132,15 @@ class Bot:
         """Pick up a wanted weapon we are standing on, whatever else we are doing."""
         reach = float((self.cfg.get("loot") or {}).get("pickup_radius", 4.0))
         kinds = [w.kind for w in me.weapons]
-        # a laser before lightning: kills happen at range
-        order = {"laser": 0, "lightning": 1}
+        # a laser before lightning: kills happen at range (brawl_loadout, squad mode: lightning
+        # first, and a laser is swapped out for it)
+        brawl = self.tactics.mode.squad() and PF.on("brawl_loadout")
+        order = {"lightning": 0, "laser": 1} if brawl else {"laser": 0, "lightning": 1}
         for p in sorted(obs.get("pickups") or [], key=lambda q: order.get(q.get("kind"), 9)):
             k = p.get("kind")
             if k not in ("laser", "lightning") or k in kinds:
+                continue
+            if brawl and k == "laser" and "lightning" in kinds:
                 continue
             pp = p.get("pos")
             if math.hypot(pp[0] - me.pos[0], pp[1] - me.pos[1]) <= reach - 0.2 and abs(pp[2] - me.pos[2]) <= 3.8:
@@ -142,6 +149,9 @@ class Bot:
                 mort = me.by_kind.get("mortar")
                 if mort is not None:
                     return p["id"], mort.slot
+                las = me.by_kind.get("laser")
+                if brawl and k == "lightning" and las is not None and las.charge == 0:
+                    return p["id"], las.slot
                 light = me.by_kind.get("lightning")
                 if k == "laser" and light is not None and light.cooldown <= 0.2:
                     return p["id"], light.slot

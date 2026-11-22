@@ -558,6 +558,10 @@ def pick_target(sit_factory, enemies, t, me_pos, prev_id=None, squad=False):
             score *= cookoff_mult(e, sit.cfg)          # mortar_priority: our laser does x1.6 to it
         if visible and reloading(e, t):
             score *= 1.4                               # punish_reload: caught reloading in the open
+        if squad and visible and PF.on("brawl_mortar") and "laser" in sit.me_weapons \
+                and getattr(e, "has", lambda k: False)("mortar") \
+                and calc.dist <= float(sit.me_weapons["laser"].get("range", 280.0)):
+            score *= 2.5                               # brawl_mortar: kill it first with the laser
         score /= 1.0 + calc.dist / 250.0
         if keep and getattr(e, "id", None) == prev_id:
             hf = e.hp_frac() if hasattr(e, "hp_frac") else 1.0

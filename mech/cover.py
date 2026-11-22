@@ -116,6 +116,7 @@ class CoverState:
         self.peek_key = None
         self.peek_t = -1e9
         self.fail_t = -1e9
+        self.extra_avoid = ()     # brawl_counter (squad): spots where a mech saw us in the last 5 s
 
     @staticmethod
     def _key(watchers):
@@ -152,6 +153,7 @@ class CoverState:
         self.peek_key = key
         self.peek_t = t
         avoid = [self.last_peek] if self.last_peek is not None else []
+        avoid += list(self.extra_avoid)
         self.peek_search = PeekSearch(self.w, self.hide[0], target_center, avoid=avoid, rng=self.rng)
 
     def peek_used(self):
