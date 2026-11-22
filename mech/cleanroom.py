@@ -1,4 +1,4 @@
-"""Clean-room pieces, written from our behaviour spec (analysis/mech/CLEANROOM-SPEC.md, ideas 1-4).
+"""Clean-room pieces, written from our behaviour spec (analysis/mech/CLEANROOM-SPEC.md, ideas 1-4 and 8).
 Implemented clean-room from our behaviour spec; no other team's code was read or used.
 
 Each piece has its own switch: `mech/cleanroom_settings.py` in free-for-all mode (which is also
@@ -18,6 +18,8 @@ every match's first 35 s) and the `cr_` keys of `mech/squad_settings.py` in squa
             loadout, in the target's sight only when a weapon is ready (out of it otherwise; always
             in sight in squad mode), out of other enemies' sight, clear of walls, inside the zone,
             with a strafe side that flips at random intervals
+    home    (free-for-all only) the hold cell between fights is costed against every mech seen in
+            the last 45 s and keeps clear of announced supply-drop landings; it is kept 30 s
 """
 import math
 
@@ -55,6 +57,7 @@ class State:
         self.cell_t = -1e9
         self.side = 1
         self.flip_t = 0.0
+        self.drops = []             # home: announced supply-drop landing points
 
 
 # ---------------------------------------------------------------- 1. gear first, fight only threats

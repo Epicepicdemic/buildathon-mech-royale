@@ -428,11 +428,16 @@ class Tactics:
         cx, cy, rs = self.mv.safe_circle(z)
         key = (z.version, round(cx), round(cy))
         dwell = 16.0 if (self.th.alive is None or self.th.alive >= 4) else 22.0
+        home = not self.mode.squad() and CR.on("home", False)     # clean-room 5: the free-for-all home spot
+        if home:
+            dwell = CR.get("home_dwell_s", False)
         if self.hold_goal is not None and key == self.hold_key and me.t - self.hold_t < dwell \
                 and math.hypot(self.hold_goal[0] - cx, self.hold_goal[1] - cy) <= rs:
             return self.hold_goal
-        threats = self.th.threat_points(me, 20.0)
+        threats = self.th.threat_points(me, CR.get("home_memory_s", False) if home else 20.0)
         drones = [tr.home for tr in self.th.npcs() if tr.home is not None]
+        if home:
+            drones += self.cr.drops             # supply drops draw a crowd: keep clear of where they land
         n = P.choose_hold(self.w, me.xy, (cx, cy, max(2.0, rs - 4.0)), threats, self.rng,
                           drones=drones, alive=self.th.alive)
         if n is None or not self.w.main[n]:
@@ -633,6 +638,7 @@ class Tactics:
         th = self.th
         z = self.zone
         self.loot.update(obs, me, self.w, th.recent_kill_drops)
+        self.cr.drops = [(d["pos"][0], d["pos"][1]) for d in obs.get("drops") or [] if d.get("pos")]
 
         # Context-aware upgrade selection
         offer = obs.get("offer")

@@ -127,6 +127,25 @@ class CleanroomTests(unittest.TestCase):
         _, on = self.run_bot(20, make, {"cells": 1})
         self.assertTrue(any("cell" in lab for _, lab in on))
 
+    # ---------------------------------------------------------------- 5. home spot
+    def test_home_keeps_clear_of_a_supply_drop(self):
+        from mech.state import Me
+        w = world()
+        goals = {}
+        for home in (0, 1):
+            CRS.S.update({"home": home})
+            bot = Bot(hello(), world=w)
+            o = obs_at(w, 20.0)
+            bot.act(o)
+            g0 = bot.tactics.hold_spot(Me(o, bot.cfg))
+            o = obs_at(w, 20.1)
+            o["drops"] = [{"id": 1, "pos": [g0[0], g0[1], w.floor(*g0)], "lands_in": 20.0}]
+            bot.act(o)
+            bot.tactics.hold_goal = None             # force a fresh pick
+            goals[home] = (g0, bot.tactics.hold_spot(Me(o, bot.cfg)))
+        g0, g1 = goals[1]
+        self.assertGreater(math.hypot(g1[0] - g0[0], g1[1] - g0[1]), 20.0)
+
     # ---------------------------------------------------------------- all on: still fast
     def test_all_on_decisions_stay_fast(self):
         def make(w, t, k):

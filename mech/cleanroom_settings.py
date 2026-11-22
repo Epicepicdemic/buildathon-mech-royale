@@ -51,6 +51,10 @@ DEFAULTS = {
     "want_light_m": 32.0,   # ... with lightning
     "avoid_light_m": 60.0,  # ... at least this from an enemy lightning holder when we lack lightning
     "avoid_mortar_m": 80.0, # ... and from a mortar holder
+    # --- 5. free-for-all home spot between fights (free-for-all only)
+    "home": 0,
+    "home_memory_s": 45.0,  # cost the home cell against every mech seen this recently ...
+    "home_dwell_s": 30.0,   # ... and keep it this long (or until the circle moves)
 }
 
 PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cleanroom_settings.json")
