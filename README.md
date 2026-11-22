@@ -124,6 +124,11 @@ is also every match's first 35 s, before the squad detector can decide) reads
 (identical actions on recorded streams, `tools/replay_actions.py`). A variant sets them in
 `mech/cleanroom_settings.json` / `mech/squad_settings.json`.
 
+**This commit switches on:** `gear`, `energy`, `silent` and `heal` in both modes (`silent` acts only in
+free-for-all mode), through `mech/cleanroom_settings.json` and `mech/squad_settings.json`; `cells` and `home` are
+off. Sandbox, 40 seeds paired with 780bef0: free-for-all +1.10 +- 0.68 places, squad +0.10 +- 0.41 (survival
++45 +- 10 s).
+
 - `gear`: a mech is fought only when it is a real threat or an easy kill: within 60 m (70 m in
   squad mode) in sight, it hit us in the last 4 s, it is charging a laser at us, it held its torso on
   us for 1 s within 110 m, it is under 35% HP in sight within 130 m, or four or fewer mechs are
