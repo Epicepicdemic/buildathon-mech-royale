@@ -1,0 +1,20 @@
+{
+ "crate_m": 176,
+ "gear_cube_m": 240,
+ "gear_cubes": 15,
+ "gear_cubes_alone": 20,
+ "gear_defend_m": 30,
+ "gear_kills": 5,
+ "gear_laser_m": 400,
+ "gear_lightning_m": 320,
+ "gear_near_m": 100,
+ "gear_roam_m": 320,
+ "gear_until_s": 180,
+ "loot_cube_m": 180,
+ "loot_killdrop_m": 210,
+ "loot_laser_m": 290,
+ "loot_lightning_m": 190,
+ "npc_aggro_m": 270,
+ "npc_hp": 0.4,
+ "npc_m": 230
+}
