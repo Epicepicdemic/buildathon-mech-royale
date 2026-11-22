@@ -94,6 +94,8 @@ class Bot:
         else:
             move, boost, jump = self.mover.steer(me, self.zone, dec.speed, dec.evasive, dec.threat_yaw, dec.hold,
                                                  shells=self.threats.projectiles)
+        if boost and self.tactics.brawl_saves_energy(me, jump, airp, dec):
+            boost = False
         move_yaw = math.atan2(move[1], move[0]) if math.hypot(move[0], move[1]) > 0.3 else None
         if dec.face is None and dec.target is None:
             dec.face = self.tactics.patrol_yaw(me, move_yaw)

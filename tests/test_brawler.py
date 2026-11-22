@@ -117,6 +117,31 @@ class LoadoutTests(unittest.TestCase):
         self.assertFalse(any("gear" in l for l in labels), labels)
 
 
+class EnergyTests(unittest.TestCase):
+    """No ground boost under 55 energy with lightning held, in squad mode only."""
+
+    def saves(self, squad, energy, weapons=None, jump=False, grounded=True, label="assault"):
+        bot = make_bot(squad)
+        me = me_at(energy=energy, weapons=weapons)
+        me.grounded = grounded
+        dec = type("Dec", (), {"label": label})()
+        with pieces(True):
+            return bot.tactics.brawl_saves_energy(me, jump, None, dec)
+
+    def test_squad_with_lightning_under_55(self):
+        self.assertTrue(self.saves(True, 40))
+        self.assertFalse(self.saves(True, 70))
+
+    def test_hops_air_and_zone_runs_keep_their_boost(self):
+        self.assertFalse(self.saves(True, 40, jump=True))
+        self.assertFalse(self.saves(True, 40, grounded=False))
+        self.assertFalse(self.saves(True, 40, label="hold >zone"))
+
+    def test_not_without_lightning_nor_in_a_free_for_all(self):
+        self.assertFalse(self.saves(True, 40, weapons=[weapon("gun"), weapon("laser")]))
+        self.assertFalse(self.saves(False, 40))
+
+
 class CommitTests(unittest.TestCase):
     def test_a_hunter_inside_45_m_gets_everything(self):
         with pieces(True):

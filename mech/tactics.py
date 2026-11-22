@@ -247,6 +247,18 @@ class Tactics:
                 return h
         return None
 
+    def brawl_saves_energy(self, me, jump, airp, dec):
+        """brawl_loadout (squad, lightning held): no ground boost under 55 energy, so a fight starts
+        with zaps in hand (a traced R12 D match lost a winning 27 m duel at 11 energy). Hops, air
+        plays, jumps and zone runs keep their boost."""
+        if not (self.mode.squad() and PF.on("brawl_loadout") and me.has("lightning")):
+            return False
+        if me.energy >= BR.BOOST_FLOOR or not me.grounded or jump or not me.in_zone:
+            return False
+        if airp is not None and not airp.done:
+            return False
+        return ">zone" not in (dec.label or "")
+
     def _brawl_act(self, me, dec, intent, target, enemies, z, cube_sz):
         """Movement and triggers for the brawler's three modes."""
         t = me.t

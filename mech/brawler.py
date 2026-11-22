@@ -32,6 +32,7 @@ from .geom import angdiff, bearing
 SEEN_MEMORY_S = 5.0     # protocol section 8: a mech that saw us tracks our real position this long
 SEEN_RADIUS_M = 7.0     # ... so a cell this close to where we were seen is burned meanwhile
 SEEN_EVERY_S = 0.5      # a seen position is noted at most this often
+BOOST_FLOOR = 55.0      # brawl_loadout: no ground boost under this much energy with lightning held
 COMMIT_MARGIN_M = 2.0   # commit inside lightning range minus this
 COMMIT_WANT_M = 28.0    # ... and close to this, so a strafing target cannot step out of the arc
 COMMIT_ENERGY = 12.0    # lightning needs energy (3 a zap, 4 a second): at least this
