@@ -16,7 +16,7 @@ Line B (`Wilce-B`) of our `mechfight/1` bot for the Builders Buildathon Mech Roy
 | `mech/doctrine.py` | Fight calculation and the five plays: assault, corner fight, harass, fighting break to cover, reposition. |
 | `mech/air.py` | Wall hop, roof edge (with pitch depression check), drop attack, laser pop-up, last-circle roof. |
 | `mech/gunner.py`, `mech/ballistics.py` | Slew-aware gun aim, weave-damped leads, bursts, laser charge and release, lightning, mortar arcs. |
-| `mech/positions.py`, `mech/cover.py`, `mech/tactics.py`, `mech/mover.py`, `mech/brain.py` | Strongpoint selection, cover search, per-tick tactical arbitration, bullet/shell dodging, and time budget. |
+| `mech/positions.py`, `mech/cover.py`, `mech/tactics.py`, `mech/mover.py`, `mech/brain.py` | Strongpoint selection, cover search, per-tick tactical arbitration, bullet/shell dodging, and the per-decision search budget. |
 | `mech/profile.py` | Squad-practice profile: a mode detector from observation only (free-for-all by default and for good on any sign of one), squad-only gear-before-kill pacing (round table 12), the squad play choice with isolation from all but one shooter, sticky DPS/HP targeting, airborne aim, the damage pieces, and switches for each piece. |
 | `mech/cleanroom.py`, `mech/cleanroom_settings.py` | Clean-room pieces from our behaviour spec (gear first, energy, hide to heal, fight cells, home spot), each behind a switch. |
 | `tests/` | Unit tests, Line B regression tests (`test_line_b.py`), the 500-case route test and the recorded-stream replay. |
@@ -185,6 +185,16 @@ per mode, each piece on alone, against 6e8634f):
 
 `MECH_PROFILE="name=0,other=1"` overrides these switches, for sandbox experiments only; the match
 container sets nothing.
+
+## Search budget (`mech/nav.py` `WorkBudget`, `mech/brain.py`)
+
+The background searches (zone field, A* routes, hide/peek/isolation cells) get a fixed amount of work
+per decision, 6,000 units (`WORK_UNITS`), not a slice of wall-clock time: a zone-field pop costs 1, an
+A* pop 2.8, a nearest-cell check 8 plus 0.08 per line-of-sight sample step it ran (counted by
+`World.line_clear`). The same observations therefore give the same actions on a fast or a slow machine
+(`tests/test_detclock.py`; a recorded squad trace replayed with the real clock plays identically on an
+Apple M-series laptop and a loaded c7i worker). A wall-clock stop 30 ms into the decision (`SAFETY_S`)
+remains only as a safety net. CI's 1-CPU container: kit check p99 11.9 ms, fuzz worst 14.3 ms.
 
 ## Build and check
 
