@@ -670,7 +670,7 @@ class Tactics:
         self.mode.update(me, th, z)
         squad = self.mode.squad()
         lt = self.laser_threat(me)
-        cr_gear = CR.on("gear", squad)
+        cr_gear = CR.gear_on(t, squad)
         # clean-room gear: only a real threat or an easy kill is fought; the rest are left to loot past
         fight = CR.threats(self, me, enemies, lt, squad) if cr_gear else enemies
         target, calc = D.pick_target(
@@ -936,7 +936,7 @@ class Tactics:
         self.loot_note = ""
 
         squad = self.mode.squad()
-        cr_gear = CR.on("gear", squad)
+        cr_gear = CR.gear_on(t, squad)
         if CR.on("heal", squad) and CR.answer_drone(self, me, dec):
             return
         if CR.on("heal", squad) and self.cr.retreat and CR.hide_and_hold(self, me, dec, squad, slack):

@@ -50,6 +50,14 @@ class CleanroomTests(unittest.TestCase):
         self.assertTrue(any(a["fire"][0] for a, _ in off[5:]), "B2 shoots it")
         self.assertFalse(any(a["fire"][0] for a, _ in on[5:]), "gear first leaves it alone")
 
+    def test_gear_phase_ends_at_gear_until_s(self):
+        def make(w, t, k):
+            o = obs_at(w, t)
+            o["mechs"] = [enemy(9, ME[0] + 150.0, ME[1], w, math.pi / 2)]
+            return o
+        _, ended = self.run_bot(20, make, {"gear": 1, "gear_until_s": 15.0})     # the run starts at 20 s
+        self.assertTrue(any(a["fire"][0] for a, _ in ended[5:]), "after the phase B2 shoots it again")
+
     def test_gear_fights_a_rusher_that_hits_us(self):
         """Counter: a rival rushing us from spawn is fought at once."""
         def make(w, t, k):

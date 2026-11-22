@@ -15,6 +15,7 @@ import os
 DEFAULTS = {
     # --- 1. gear first, engage only a real threat or an easy kill
     "gear": 0,
+    "gear_until_s": 1e9,    # the gear phase ends at this match time (default: never)
     "engage_m": 60.0,       # a mech in sight this close is a threat
     "hit_s": 4.0,           # ... so is one that hit us this recently
     "aim_m": 110.0,         # ... or one holding its torso on us for a second within this

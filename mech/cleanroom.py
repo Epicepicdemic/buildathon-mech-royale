@@ -41,6 +41,11 @@ def on(name, squad):
     return bool(get(name, squad))
 
 
+def gear_on(t, squad):
+    """gear is switched on and its phase has not ended."""
+    return on("gear", squad) and t < get("gear_until_s", squad)
+
+
 class State:
     """Per-match memory of the clean-room pieces."""
 
