@@ -12,6 +12,7 @@ import random
 
 from . import ballistics as bal
 from . import profile as PF
+from . import squad_settings as SS
 from .geom import wrap, angdiff, clamp
 
 GUN_LEAD_RAD = 0.12         # gun_during_charge: the gun fires while the laser charges only when its
@@ -42,6 +43,7 @@ class Target:
 
 class Gunner:
     def __init__(self, cfg, world, seed=0):
+        self.squad = False      # set by the brain each decision (squad_settings applies in squad mode)
         self.cfg = cfg
         self.w = world
         self.rng = random.Random(seed)
@@ -226,7 +228,7 @@ class Gunner:
                         and (no_laser_start or (dist > 140 and tgt.track is not None and not tgt.track.los)):
                     release = True
                 if not release and on and clear and PF.on("partial_release") and tgt.track is not None \
-                        and tgt.track.hp is not None and 0.7 * self.release_damage(me, laser, tgt) >= tgt.track.hp:
+                        and tgt.track.hp is not None and (SS.get("partial_frac") if self.squad else 0.7) * self.release_damage(me, laser, tgt) >= tgt.track.hp:
                     release = True                  # a partial charge already kills it
                 fire[laser.slot] = not release
                 if release:

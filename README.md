@@ -103,6 +103,15 @@ switches on when the first hunter converges after 35 s.
 
 Not included: the wall back-off of candidate 1.
 
+### Switchboard (`mech/squad_settings.py`)
+
+Every number that shapes squad-mode play is a knob in `mech/squad_settings.py`. The defaults are B2's
+values, so the default build plays exactly like 8d7d9cb: replaying five recorded streams (9,615
+decisions, three squad matches, two free-for-alls) gives identical actions (`tools/replay_actions.py`).
+A variant is `mech/squad_settings.json`, written and committed by `tools/variant.py key=value ...`. An
+unknown key or a wrong type stops the bot at start. Free-for-all play reads none of the knobs
+(`tests/test_switchboard.py`), and the mode detector's thresholds are not knobs.
+
 ## Build and check
 
 ```

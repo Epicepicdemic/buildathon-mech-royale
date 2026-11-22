@@ -98,6 +98,7 @@ class Bot:
         obstacles = [tr for tr in self.threats.tracks.values() if tr.in_obs and not tr.dead]
         for c in obs.get("crates") or []:
             obstacles.append(_Crate(c))
+        self.gunner.squad = self.tactics.mode.squad()
         aim, fire, reload, info = self.gunner.control(me, dec.intent, dec.target, obstacles, dec.face, move_yaw,
                                                       obs.get("events") or [])
         action = {"tick": obs["tick"], "move": [round(move[0], 4), round(move[1], 4)], "boost": bool(boost),

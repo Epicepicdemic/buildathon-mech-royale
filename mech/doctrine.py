@@ -16,6 +16,7 @@ touches the network or the clock, so each piece can be tested by feeding it a Si
 import math
 
 from . import profile as PF
+from . import squad_settings as SS
 
 from .ballistics import reversal_range
 from .geom import angdiff, bearing
@@ -55,8 +56,12 @@ def cookoff_mult(enemy, cfg):
     return 1.0 + float(_wstats(cfg, "laser").get("cookoff", 0.6))
 
 
-def reloading(enemy, t):
-    return PF.on("punish_reload") and t - getattr(enemy, "t_reload_heard", -1e9) <= RELOAD_S
+def reloading(enemy, t, window=None):
+    return PF.on("punish_reload") and t - getattr(enemy, "t_reload_heard", -1e9) <= (RELOAD_S if window is None else window)
+
+
+def _reload_window(sit):
+    return SS.get("reload_s") if getattr(sit, "house", False) else None
 HYST = 0.2
 CORNER_TAKE = 0.72      # from a corner we fight unless the calculation says we clearly lose
 
@@ -198,7 +203,7 @@ class FightCalc:
             theirs *= 0.6
         self.their_dps_on_us = theirs
         # its threat over the fight (a reload is a moment to punish, not a reason to rank it lower)
-        self.threat_dps = theirs if not reloading(e, sit.t) else theirs * self.their_dps(e, self.dist, False) \
+        self.threat_dps = theirs if not reloading(e, sit.t, _reload_window(sit)) else theirs * self.their_dps(e, self.dist, False) \
             / max(self.their_dps(e, self.dist), 1e-6)
         extra = 0.0
         for o in sit.others:
@@ -247,7 +252,7 @@ class FightCalc:
             if kind == "gun" and house:
                 _, sus = gun_dps(st or {}, getattr(e, "cubes", 0), cfg)
                 p = 0.0 if dist > float((st or {}).get("range", 230.0)) else _band(HOUSE_GUN, dist)
-                tot += sus * p * (0.25 if discount_reload and reloading(e, sit.t) else 1.0)
+                tot += sus * p * (SS.get("reload_discount") if discount_reload and reloading(e, sit.t, SS.get("reload_s")) else 1.0)
             elif kind == "laser" and house:
                 if dist <= float((st or {}).get("range", 280.0)):
                     tot += 315.0 * m / 2.4 * _band(HOUSE_LASER, dist)
@@ -278,6 +283,8 @@ class FightCalc:
             elif kind == "mortar":
                 if 12.0 < dist <= 235.0:
                     tot += 280.0 * m / 2.6 * 0.3
+        if getattr(sit, "house", False):
+            tot *= SS.get("their_dps_mult")             # squad mode: the switchboard's scale
         return tot * (1.0 - min(0.9, sit.me_armor))
 
 
@@ -317,26 +324,34 @@ class Assault:
         p = e.est_pos(sit.t) if hasattr(e, "est_pos") else e.pos
         calc = ctx.get("calc") if ctx else None
         dist = math.hypot(p[0] - sit.me_pos[0], p[1] - sit.me_pos[1])
-        want = 38.0 if "lightning" in sit.me_weapons else 62.0
-        if "laser" in sit.me_weapons and "lightning" not in sit.me_weapons:
-            want = 85.0
-        house = getattr(sit, "house", False) and PF.on("house_aim")
+        sq = getattr(sit, "house", False)              # squad mode: the switchboard's numbers
+        if sq:
+            want = SS.get("want_lightning_m") if "lightning" in sit.me_weapons else SS.get("want_gun_m")
+            if "laser" in sit.me_weapons and "lightning" not in sit.me_weapons:
+                want = SS.get("want_laser_m")
+        else:
+            want = 38.0 if "lightning" in sit.me_weapons else 62.0
+            if "laser" in sit.me_weapons and "lightning" not in sit.me_weapons:
+                want = 85.0
+        house = sq and PF.on("house_aim")
         if getattr(e, "has", lambda k: False)("mortar"):
             # its blast throws us back and drains the energy lightning needs: stay at gun/laser range
-            want = max(want, HOUSE_MORTAR_M if house else 75.0)
+            want = max(want, SS.get("floor_mortar_m") if house else 75.0)
         if getattr(e, "has", lambda k: False)("lightning") and ("lightning" not in sit.me_weapons or house):
             # never walk into a 240-DPS lightning cone when we outrange it with gun/laser (house
             # experts with gun and lightning rush at every range and score 36% of their kills
             # with it: a hard floor of 70 m)
-            want = max(want, HOUSE_LIGHTNING_M if house else 58.0)
-        if PF.on("finish_close"):
+            want = max(want, SS.get("floor_lightning_m") if house else 58.0)
+        if (SS.get("finish_on") if sq else PF.on("finish_close")):
             # finish a weak target from close (recon/rea-mech-royale.md P2): it under 38% HP, us over
             # 42%, at most two others near
             e_hp = e.hp_frac() if hasattr(e, "hp_frac") else 1.0
-            if e_hp < FINISH_TARGET_HP and sit.me_hp / max(sit.me_max_hp, 1.0) > FINISH_OWN_HP \
+            f_t, f_own, f_m = (SS.get("finish_target_hp"), SS.get("finish_own_hp"), SS.get("finish_m")) if sq \
+                else (FINISH_TARGET_HP, FINISH_OWN_HP, FINISH_M)
+            if e_hp < f_t and sit.me_hp / max(sit.me_max_hp, 1.0) > f_own \
                     and len(sit.others) <= 2:
                 # the clamps stand (brainstorm/r12: 20 m walked 928be36 into lightning range)
-                fin = FINISH_M
+                fin = f_m
                 has = getattr(e, "has", lambda k: False)
                 if has("lightning") and not ("lightning" in sit.me_weapons and sit.me_energy >= 35.0):
                     fin = max(fin, FINISH_LIGHTNING_M)
@@ -350,9 +365,9 @@ class Assault:
             else:
                 it.goal = (p[0], p[1])
             it.spot = "approach"
-            it.speed = "boost" if dist > want + 25 and sit.me_energy > 35 else "walk"
+            it.speed = "boost" if dist > want + 25 and sit.me_energy > (SS.get("assault_boost_energy") if sq else 35) else "walk"
         elif getattr(e, "has", lambda k: False)("lightning") and ("lightning" not in sit.me_weapons or house) \
-                and dist < (HOUSE_LIGHTNING_M if house else 49.0):
+                and dist < (SS.get("floor_lightning_m") if house else 49.0):
             # kite back outside 45 m while firing full bursts
             dx, dy = sit.me_pos[0] - p[0], sit.me_pos[1] - p[1]
             d = math.hypot(dx, dy) or 1.0
@@ -511,12 +526,16 @@ def choose_play(sit, calc=None, prev=None, squad=False):
         return BREAK, calc
     if hp_frac < 0.3 and not calc.finishable and not (squad and PF.on("squad_no_break")):
         return BREAK, calc
-    a_thr = ASSAULT_RATIO - (HYST if prev == ASSAULT else 0.0) + (HYST if prev == CORNER else 0.0)
-    e_thr = EVEN_RATIO - (HYST if prev in (CORNER, ASSAULT) else 0.0) + (HYST if prev == BREAK else 0.0)
+    if squad:
+        ar, er, ct = SS.get("assault_ratio"), SS.get("even_ratio"), SS.get("corner_take")
+    else:
+        ar, er, ct = ASSAULT_RATIO, EVEN_RATIO, CORNER_TAKE
+    a_thr = ar - (HYST if prev == ASSAULT else 0.0) + (HYST if prev == CORNER else 0.0)
+    e_thr = er - (HYST if prev in (CORNER, ASSAULT) else 0.0) + (HYST if prev == BREAK else 0.0)
     if calc.ratio >= a_thr or (calc.finishable and calc.ratio >= 0.85):
         return ASSAULT, calc
     # from cover (or open ground at >= 0.72), fight rather than showing our back
-    if calc.ratio >= e_thr or (sit.corner and calc.ratio_corner >= CORNER_TAKE + (HYST if prev == BREAK else 0.0)):
+    if calc.ratio >= e_thr or (sit.corner and calc.ratio_corner >= ct + (HYST if prev == BREAK else 0.0)):
         return CORNER, calc
     if retreating(sit, e) and sit.long_sight and calc.dist <= 230.0:
         return HARASS, calc
@@ -538,30 +557,45 @@ def pick_target(sit_factory, enemies, t, me_pos, prev_id=None, squad=False):
     sticky_on = PF.on("sticky_target")
     shooters = sum(1 for e in enemies if getattr(e, "los", False) and getattr(e, "sees_us", False))
     keep = sticky_on and prev_id is not None and (squad or shooters < 2)
+    if squad:                                          # the switchboard's weights (squad mode only)
+        g = SS.get
+        W = (g("score_dps_add"), g("score_hp_floor"), g("unseen_mult"), g("engaged_mult"), g("hit_us_mult"),
+             g("finishable_mult"), g("reload_mult"), g("dist_scale_m"), g("sticky"), g("sticky_weak"),
+             g("sticky_weak_hp"), g("reload_s"), g("facing_away_mult"), g("mortar_mult"))
+    else:
+        W = (80.0, 120.0, 0.35, 1.55, 1.3, 2.1, 1.4, 250.0, STICKY, STICKY_WEAK, 0.35, None, 1.0, None)
+    w_add, w_floor, w_unseen, w_eng, w_hit, w_fin, w_rel, w_dist, w_st, w_weak, w_weak_hp, w_rs, w_away, w_mort = W
     for e in enemies:
         sit = sit_factory(e)
         calc = FightCalc(sit, e)
         if sticky_on:
-            score = (calc.threat_dps + 80.0) / max(calc.enemy_hp, 120.0)
+            score = (calc.threat_dps + w_add) / max(calc.enemy_hp, w_floor)
         else:
             score = calc.ratio
         visible = getattr(e, "los", False)
         if not visible:
-            score *= 0.35            # a memory or a sound: anything we can actually shoot comes first
+            score *= w_unseen        # a memory or a sound: anything we can actually shoot comes first
         if e.engaged_elsewhere(t) if hasattr(e, "engaged_elsewhere") else False:
-            score *= 1.55
+            score *= w_eng
         if getattr(e, "t_hit_us", -1e9) >= t - 2.0:
-            score *= 1.3 if sticky_on else 2.0       # whoever is hitting us now
+            score *= w_hit if sticky_on else 2.0     # whoever is hitting us now
         if calc.finishable and visible:
-            score *= 2.1
+            score *= w_fin
         if "laser" in sit.me_weapons:
-            score *= cookoff_mult(e, sit.cfg)          # mortar_priority: our laser does x1.6 to it
-        if visible and reloading(e, t):
-            score *= 1.4                               # punish_reload: caught reloading in the open
-        score /= 1.0 + calc.dist / 250.0
+            if w_mort is None:
+                score *= cookoff_mult(e, sit.cfg)      # mortar_priority: our laser does x1.6 to it
+            elif PF.on("mortar_priority") and getattr(e, "has", lambda k: False)("mortar"):
+                score *= w_mort
+        if visible and reloading(e, t, w_rs):
+            score *= w_rel                             # punish_reload: caught reloading in the open
+        if w_away != 1.0:
+            ep = e.est_pos(t) if hasattr(e, "est_pos") else e.pos
+            if angdiff(getattr(e, "yaw", 0.0), bearing(ep, me_pos)) > math.pi / 2:
+                score *= w_away                        # its torso turned away from us
+        score /= 1.0 + calc.dist / w_dist
         if keep and getattr(e, "id", None) == prev_id:
             hf = e.hp_frac() if hasattr(e, "hp_frac") else 1.0
-            score *= STICKY_WEAK if hf < 0.35 else STICKY
+            score *= w_weak if hf < w_weak_hp else w_st
         if best is None or score > best[0]:
             best = (score, e, calc)
     return (best[1], best[2]) if best else (None, None)
