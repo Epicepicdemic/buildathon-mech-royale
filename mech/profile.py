@@ -54,6 +54,7 @@ PROFILE = {
     "clear_aim": True,
     "laser_hold": True,
     "reengage": True,
+    "gun_popup": True,
 }
 
 SQUAD_AFTER_S = 35.0        # no squad decision before this. The first death came by 29.9 s in all 67
