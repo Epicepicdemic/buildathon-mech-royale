@@ -120,10 +120,11 @@ the last 10 s, or is in view, sees us and has its torso within 0.45 rad of us.
   - open ground of at least 18 m in two directions at least 1.6 rad apart (a second way out);
   - not within 7 m of anywhere a mech saw us in the last 5 s.
 
-  There we hold, face the hunter and stay silent unless it sees us. Commit fires when it walks into
-  range. Corner peeks in squad mode also skip spots seen in the last 5 s.
+  There we hold, face the hunter and stay silent unless it sees us. Commit fires when it walks within
+  lightning range minus 2 m (43 m at the base 45 m range). Corner peeks in squad mode also skip spots seen in the last 5 s.
 - Mortar holders (`brawl_mortar`): with a laser (lightning not yet found), a visible mortar holder in
-  laser range scores x2.5 as a target, on top of the x1.6 cook-off. Without a laser, mortar holders and
+  laser range scores x2.5 as a target, on top of the x1.6 cook-off (`pick_target` in
+  `mech/doctrine.py`; `MORTAR_LASER_MULT` in `mech/brawler.py` names the same number but is not read). Without a laser, mortar holders and
   any hunter within 45 m of one are never attacked. During a commit, a mortar holder beyond 20 m is the
   last choice. The doorway search hides from mortar holders like any other watcher.
 - Crossfire: none. There is no positioning to make a mortar's splash hit its teammate and no body
