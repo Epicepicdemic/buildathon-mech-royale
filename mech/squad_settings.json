@@ -1,0 +1,10 @@
+{
+ "dist_scale_m": 80,
+ "engaged_mult": 3,
+ "finishable_mult": 6,
+ "partial_frac": 1.0,
+ "score_hp_floor": 30,
+ "sticky": 5,
+ "sticky_weak": 8,
+ "unseen_mult": 0.1
+}
