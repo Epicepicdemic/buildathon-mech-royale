@@ -1269,6 +1269,23 @@ class Tactics:
                     intent.fire = "long"
                     intent.spot = "peek"
                     return True
+        # 4. gun_popup: jet-peek over low cover with the gun (no laser ready), nobody watching us
+        gun = me.by_kind.get("gun")
+        if PF.on("gun_popup") and gun is not None and target is not None and (laser is None or laser.cooldown > 0.5) \
+                and play in (D.ASSAULT, D.CORNER, D.HARASS) and not target.los \
+                and not any(e.sees_us for e in enemies) and t - target.t_seen < 3.0 \
+                and gun.reload <= 0 and (gun.ammo is None or gun.ammo >= 5):
+            tp = target.est_pos(t)
+            d = math.hypot(tp[0] - me.pos[0], tp[1] - me.pos[1])
+            if 35.0 <= d <= 150.0:
+                rise = A.GunPop.find(w, me, (tp[0], tp[1], tp[2] + 4.5), A.GunPop.MAX_RISE, mech_cfg)
+                if rise is not None:
+                    self.air = A.GunPop()
+                    self.air.start(t, rise)
+                    self.air_ban_until = t + 7.0
+                    intent.fire = "long"
+                    intent.spot = "peek"
+                    return True
         return False
 
     def drop_choice(self, me, obs):

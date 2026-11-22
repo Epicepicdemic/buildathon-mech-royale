@@ -276,3 +276,45 @@ class ReengageTests(unittest.TestCase):
                 self.assertGreaterEqual(math.hypot(hx[0] - me.pos[0], hx[1] - me.pos[1]), 15.0 - 1.0)
                 goal = tc._reengage(me, D.CORNER, tr, None, [tr], 60.0)
                 self.assertEqual(tuple(goal), tuple(hx))
+
+
+class _LowWall:
+    """Sight from (0,0) to x=100 is blocked below z = 9 m at x = 50."""
+
+    def line_clear(self, ax, ay, az, bx, by, bz, **kw):
+        u = (50.0 - ax) / (bx - ax)
+        return az + (bz - az) * u > 9.0
+
+
+class GunPopTests(unittest.TestCase):
+    def test_find_needs_low_cover_and_an_energy_reserve(self):
+        from mech import air as A
+        me = Me(self_obs(pos=(0.0, 0.0, 0.0), energy=100), config())
+        rise = A.GunPop.find(_LowWall(), me, (100.0, 0.0, 4.5))
+        self.assertIsNotNone(rise)
+        self.assertLessEqual(rise, A.GunPop.MAX_RISE + 1.0)
+        low = Me(self_obs(pos=(0.0, 0.0, 0.0), energy=30), config())
+        self.assertIsNone(A.GunPop.find(_LowWall(), low, (100.0, 0.0, 4.5)))
+
+    def test_pops_then_cuts_the_jets_without_hovering(self):
+        from mech import air as A
+        g = A.GunPop()
+        g.start(10.0, 5.0)
+        me = Me(self_obs(pos=(0.0, 0.0, 0.0), t=10.0), config())
+        _, boost, jump, done = g.step(me)
+        self.assertTrue(jump)
+        obs = self_obs(pos=(0.0, 0.0, 2.0), t=10.2)
+        obs["self"]["grounded"] = False
+        _, boost, jump, done = g.step(Me(obs, config()))
+        self.assertTrue(boost)
+        obs = self_obs(pos=(0.0, 0.0, 5.5), t=10.8)
+        obs["self"]["grounded"] = False
+        _, boost, _, _ = g.step(Me(obs, config()))
+        self.assertFalse(boost)
+        obs = self_obs(pos=(0.0, 0.0, 3.0), t=11.0)
+        obs["self"]["grounded"] = False
+        _, boost, _, done = g.step(Me(obs, config()))
+        self.assertFalse(boost)          # once cut, never again: it falls
+        self.assertFalse(done)
+        _, _, _, done = g.step(Me(self_obs(pos=(0.0, 0.0, 0.0), t=11.4), config()))
+        self.assertTrue(done)

@@ -54,6 +54,7 @@ PROFILE = {
     "clear_aim": True,
     "laser_hold": True,
     "reengage": True,
+    "gun_popup": True,
 }
 
 SQUAD_AFTER_S = 20.0        # no squad decision before this
