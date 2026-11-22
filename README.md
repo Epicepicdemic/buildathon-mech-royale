@@ -17,6 +17,7 @@ Line B (`Wilce-B`) of our `mechfight/1` bot for the Builders Buildathon Mech Roy
 | `mech/air.py` | Wall hop, roof edge (with pitch depression check), drop attack, laser pop-up, last-circle roof. |
 | `mech/gunner.py`, `mech/ballistics.py` | Slew-aware gun aim, weave-damped leads, bursts, laser charge and release, lightning, mortar arcs. |
 | `mech/positions.py`, `mech/cover.py`, `mech/tactics.py`, `mech/mover.py`, `mech/brain.py` | Strongpoint selection, cover search, per-tick tactical arbitration, bullet/shell dodging, and time budget. |
+| `mech/brawler.py` | Candidate D, squad mode only: the close-quarters brawler and counter-attacker (lightning-first loadout, commit, attack, doorway counter, mortar handling, energy floor). |
 | `mech/profile.py` | Squad-practice profile: a mode detector from observation only (free-for-all by default and for good on any sign of one), squad-only gear-before-kill pacing (round table 12), the squad play choice with isolation from all but one shooter, sticky DPS/HP targeting, airborne aim, the damage pieces, and switches for each piece. |
 | `tests/` | Unit tests, Line B regression tests (`test_line_b.py`), the 500-case route test and the recorded-stream replay. |
 | `tools/route_test.py`, `tools/kinesim.py` | Route test harness and the approximate movement model it drives. |
@@ -78,6 +79,55 @@ switches on when the first hunter converges after 35 s.
   it) and 95 m from a mortar holder.
 - Reloads (`punish_reload`): a target heard reloading in the last 2.2 s counts its gun at a quarter in
   the fight calculation.
+
+### Candidate D: squad-mode brawler (`mech/brawler.py`)
+
+Squad mode only: every entry point checks the detector above, so none of this runs before the switch
+(at the earliest 35 s) or at all in a free-for-all. Free-for-all play is unchanged: `tests/test_brawler.py`
+checks that a free-for-all close fight and the kit's recorded stream give identical actions with the
+pieces on and off. Switches in `PROFILE`, all on by default: `brawl_loadout`, `brawl_commit`,
+`brawl_attack`, `brawl_counter`, `brawl_mortar`. Each decision tries commit, then attack, then counter;
+none applies with under 4 s of zone slack, and air plays are skipped while one does.
+
+A hunter here is a mech that hit us in the last 10 s, held its torso within 0.2 rad of us for 1 s in
+the last 10 s, or is in view, sees us and has its torso within 0.45 rad of us.
+
+- Loadout (`brawl_loadout`): lightning is sought before the laser. A held laser that is not charging
+  is dropped for lightning, and the gun is kept. A laser is no longer taken once we hold lightning, and
+  a mortar is still swapped out for either. With lightning held:
+  - Upgrades go lightning first: efficiency, then range, ahead of plating; chain, reactor and capacitor
+    come after plating.
+  - Lightning counts as geared, so `gear_first` ends.
+  - Energy floor: no ground boost under 55 energy, so a fight starts with zaps in hand. Jumps, flight,
+    air plays, being outside the zone and zone runs keep their boost.
+- Commit (`brawl_commit`): this fires with lightning held, at least 12 energy, and a hunter in view
+  inside lightning range minus 2 m (43 m at the base 45 m range).
+  - Target: the visible mech in that range that the arc chains through most (other mechs within
+    14 m of it, at most 2), then the nearest. Without a laser, a mortar holder beyond 20 m comes last.
+  - Gun and lightning both fire on it. We walk in to about 28 m and strafe from there.
+  - No break, unless we are under 20% HP against a target over 50%.
+- Attack (`brawl_attack`): this needs lightning held, at least 55 energy, at least 55% HP, and at most
+  two mechs seeing us.
+  - Target: a hunter seen in the last 3 s within 160 m, with no other hunter within 75 m of it or of
+    us. Mechs within 14 m of it are allowed (at most 2: the chain hits them), and more of them is
+    preferred, then the nearer target.
+  - We close on it, through cover when more than 60 m out, toward a point 20 m behind it when it is
+    not looking at us. The gun fires while it is in sight; commit takes over inside lightning range.
+- Counter (`brawl_counter`): with lightning held and a hunter between lightning range and 140 m, we go
+  to a cell within 40 m of walking that meets all of these:
+  - hidden from every known threat point;
+  - a wall within 8 m;
+  - open ground of at least 18 m in two directions at least 1.6 rad apart (a second way out);
+  - not within 7 m of anywhere a mech saw us in the last 5 s.
+
+  There we hold, face the hunter and stay silent unless it sees us. Commit fires when it walks into
+  range. Corner peeks in squad mode also skip spots seen in the last 5 s.
+- Mortar holders (`brawl_mortar`): with a laser (lightning not yet found), a visible mortar holder in
+  laser range scores x2.5 as a target, on top of the x1.6 cook-off. Without a laser, mortar holders and
+  any hunter within 45 m of one are never attacked. During a commit, a mortar holder beyond 20 m is the
+  last choice. The doorway search hides from mortar holders like any other watcher.
+- Crossfire: none. There is no positioning to make a mortar's splash hit its teammate and no body
+  blocking. Practice-squad friendly-fire rules are unrecorded (analysis/mech/CROSSFIRE.md).
 
 ### What changes in both modes (free-for-all play too)
 
