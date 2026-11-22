@@ -65,6 +65,8 @@ class Bot:
         self.cover.run(end - 0.0004)
         if self.tactics.isolating:
             self.tactics.iso.run(end - 0.0002)
+        if self.tactics.reengaging:
+            self.tactics.reeng.run(end - 0.0001)
         for srch in (self.tactics.opening_search, self.tactics.second_search):
             if srch is not None and not srch.done and time.perf_counter() < end:
                 srch.run(end)
