@@ -18,6 +18,10 @@ every match's first 35 s) and the `cr_` keys of `mech/squad_settings.py` in squa
             loadout, in the target's sight only when a weapon is ready (out of it otherwise; always
             in sight in squad mode), out of other enemies' sight, clear of walls, inside the zone,
             with a strafe side that flips at random intervals
+    hunt    once geared (a laser and 3 cubes, or 8 cubes) with HP >= 80% and energy >= 40: the
+            gear filter stands aside (every mech in reach is fought) and with nobody in sight we walk
+            to the weakest mech seen in the last 30 s, a mech busy with someone else first, or to
+            gunfire heard near; it ends under 55% HP (the heal retreat takes over)
     home    (free-for-all only) the hold cell between fights is costed against every mech seen in
             the last 45 s and keeps clear of announced supply-drop landings; it is kept 30 s
 """
@@ -62,7 +66,8 @@ class State:
         self.cell_t = -1e9
         self.side = 1
         self.flip_t = 0.0
-        self.drops = []             # home: announced supply-drop landing points
+        self.drops = []
+        self.hunting = False        # hunt: the hunting posture is on             # home: announced supply-drop landing points
 
 
 # ---------------------------------------------------------------- 1. gear first, fight only threats
@@ -102,8 +107,73 @@ def is_threat(tac, me, e, lt, squad):
 
 def threats(tac, me, enemies, lt, squad):
     note_aim(tac.cr, me, tac.th)
-    tac.cr.threats = [e for e in enemies if is_threat(tac, me, e, lt, squad)]
+    if tac.cr.hunting:
+        tac.cr.threats = [e for e in enemies if not e.dead]       # hunting: everything in reach is fair game
+    else:
+        tac.cr.threats = [e for e in enemies if is_threat(tac, me, e, lt, squad)]
     return tac.cr.threats
+
+
+# ---------------------------------------------------------------- 6. hunt
+def update_hunt(tac, me, squad):
+    st = tac.cr
+    if not on("hunt", squad):
+        st.hunting = False
+        return False
+    hp = me.hp_frac
+    if st.hunting:
+        if hp < get("hunt_stop_hp", squad) or st.retreat:
+            st.hunting = False
+    else:
+        geared = me.cubes >= get("hunt_cubes_alone", squad) or (me.has("laser") and me.cubes >= get("hunt_cubes", squad))
+        if geared and hp >= get("hunt_hp", squad) and me.energy >= get("hunt_energy", squad) and not st.retreat:
+            st.hunting = True
+    return st.hunting
+
+
+def hunt_goal(tac, me, squad):
+    """Where to look for a kill: the weakest mech seen lately (one busy with someone else counts as
+    closer), else gunfire heard near in the last 10 s. Returns ((x, y), label) or None."""
+    t = me.t
+    z = tac.zone
+    th = tac.th
+    best = None
+    for tr in th.mechs():
+        if tr.kind != "mech" or tr.dead or t - tr.t_seen > get("hunt_memory_s", squad):
+            continue
+        p = tr.est_pos(t)
+        if z.margin_at(p[0], p[1], t + 5.0) < 0.0:
+            continue
+        d = math.hypot(p[0] - me.pos[0], p[1] - me.pos[1])
+        sc = d * (0.5 + tr.hp_frac())
+        if tr.engaged_elsewhere(t, 6.0):
+            sc -= get("hunt_fight_bonus_m", squad)
+        if best is None or sc < best[0]:
+            best = (sc, (p[0], p[1]), "cr hunt %d" % tr.id)
+    if best is None:
+        for c in th.contacts:
+            if t - c.t <= 10.0 and c.band in ("near", "mid") and c.kind in ("gun", "laser", "lightning", "mortar") \
+                    and c.pos is not None and z.margin_at(c.pos[0], c.pos[1], t + 5.0) >= 0.0:
+                d = math.hypot(c.pos[0] - me.pos[0], c.pos[1] - me.pos[1])
+                if best is None or d < best[0]:
+                    best = (d, (c.pos[0], c.pos[1]), "cr hunt sound")
+    return (best[1], best[2]) if best else None
+
+
+def hunt_move(tac, me, dec, squad, slack):
+    """No fight this decision: walk toward a kill. Returns True when it set the movement."""
+    if not tac.cr.hunting or slack < 15.0 or not me.in_zone:
+        return False
+    g = hunt_goal(tac, me, squad)
+    if g is None:
+        return False
+    goal, label = g
+    if math.hypot(goal[0] - me.pos[0], goal[1] - me.pos[1]) < 25.0:
+        return False                    # close: the fight plays take over once it is in view
+    tac.mv.go(goal, me, tac.zone, prefer_cover=True, tag="cr-hunt", replan_dist=8.0)
+    dec.speed = "walk"
+    dec.intent.label = label
+    return True
 
 
 def loot_allow(st, t):

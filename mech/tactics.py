@@ -682,6 +682,7 @@ class Tactics:
         self.mode.update(me, th, z)
         squad = self.mode.squad()
         lt = self.laser_threat(me)
+        CR.update_hunt(self, me, squad)     # clean-room hunt: geared and healthy, the gear filter stands aside
         cr_gear = CR.gear_on(t, squad)
         # clean-room gear: only a real threat or an easy kill is fought; the rest are left to loot past
         fight = CR.threats(self, me, enemies, lt, squad) if cr_gear else enemies
@@ -697,7 +698,7 @@ class Tactics:
             self.mv.booster.low, self.mv.booster.resume = SS.get("boost_low"), SS.get("boost_resume")
         else:
             self.mv.booster.low, self.mv.booster.resume = 8.0, 40.0
-        gear = self._gear_hunter(me, enemies, squad, sit.unseen_hit)
+        gear = self._gear_hunter(me, enemies, squad, sit.unseen_hit) if not self.cr.hunting else None
         self.isolating = False
         play, calc = D.choose_play(sit, calc if target is not None else None, prev=self.last_play, squad=squad)
         if squad and PF.on("squad_no_break"):
@@ -1050,6 +1051,10 @@ class Tactics:
                     dec.evasive = True
                 intent.label = "farm %s" % sc.kind
                 return
+
+        # 3b. clean-room hunt: nothing to loot or farm, geared and healthy: go find a kill
+        if CR.hunt_move(self, me, dec, squad, slack):
+            return
 
         # 4. Supply drops (take uncontested drops; hold covered ambush angle near contested ones)
         if not under_pressure and slack > 18.0:
