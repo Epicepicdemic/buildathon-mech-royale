@@ -136,6 +136,11 @@ class Gunner:
         yaw, pitch, tf, aimp = bal.lead(me.muzzle, tgt.center(), tvel, speed, latency=0.05 + min(ta, 0.5), ovel=me.vel)
         return yaw, clamp(pitch, me.min_pitch, me.max_pitch), tf, aimp
 
+    def _on(self, name):
+        """An aim piece's switch for the current mode: `name` in both modes, and `name_squad` too
+        once the mode detector says squad (self.squad, set by the brain each decision)."""
+        return PF.on(name) and (not self.squad or PF.on(name + "_squad"))
+
     def _target_acc(self, tgt, raw_vel=True):
         """accel_lead: the track's measured horizontal acceleration, or None (off, no track, or a
         weave-damped velocity is in use)."""
@@ -264,7 +269,7 @@ class Gunner:
             laser_active = laser is not None and laser.charge > 0
             gun_sol = None
             if laser_active:
-                if PF.on("laser_aim"):
+                if self._on("laser_aim"):
                     yaw, pitch, aimp = self._laser_aim(me, tgt)
                 else:
                     yaw, pitch, aimp = self._direct_aim(me, tgt, latency=self.dt)
@@ -277,7 +282,7 @@ class Gunner:
                     gs = self._gun_aim(me, tgt, gun)
                     if angdiff(gs[0], yaw) <= GUN_LEAD_RAD and abs(gs[1] - pitch) <= GUN_LEAD_RAD:
                         gun_sol = gs
-                if PF.on("clear_aim") and self.w is not None and not self._clear_line(me, aimp):
+                if self._on("clear_aim") and self.w is not None and not self._clear_line(me, aimp):
                     # the beam hits anywhere on the body: put it on the part the line reaches
                     aim, ok = self._clear_part(me, tgt, aim, aimp)
                     if ok:
@@ -312,7 +317,7 @@ class Gunner:
                 yaw, pitch, aimp = self._direct_aim(me, tgt)
                 aim = [yaw, pitch]
             gun_line = True
-            if PF.on("clear_aim") and gun is not None and not laser_active and self.w is not None:
+            if self._on("clear_aim") and gun is not None and not laser_active and self.w is not None:
                 # the bullet goes to the lead point, not to where the target is now: aim at a part of
                 # it the line reaches (centre, else head, else legs), or hold the gun
                 aim, gun_line = self._clear_part(me, tgt, aim, aimp)
@@ -385,7 +390,7 @@ class Gunner:
                             fire[mortar.slot] = True
         if tgt is not None and laser is not None and laser.charge > 0:
             self.laser_tgt, self.laser_tgt_t = tgt, t
-        if aim is None and laser is not None and laser.charge > 0 and not no_laser_start and PF.on("laser_hold"):
+        if aim is None and laser is not None and laser.charge > 0 and not no_laser_start and self._on("laser_hold"):
             aim = self._laser_hold(me, laser, fire, info)
         if aim is None:
             yaw = face_yaw if face_yaw is not None else (move_yaw if move_yaw is not None else me.yaw)
