@@ -76,6 +76,36 @@ class CleanroomTests(unittest.TestCase):
         _, on = self.run_bot(15, make, {"gear": 1})
         self.assertTrue(any(a["fire"][0] for a, _ in on[5:]))
 
+    # ---------------------------------------------------------------- 6. hunt
+    def test_hunt_geared_and_healthy_fights_a_passive_mech(self):
+        def make(w, t, k):
+            o = obs_at(w, t, weapons=[weapon("gun"), weapon("laser")])
+            o["self"]["cubes"] = 4
+            o["mechs"] = [enemy(9, ME[0] + 150.0, ME[1], w, math.pi / 2)]
+            return o
+        _, nohunt = self.run_bot(20, make, {"gear": 1, "hunt": 0})
+        _, hunt = self.run_bot(20, make, {"gear": 1, "hunt": 1})
+        self.assertFalse(any(a["fire"][0] or a["fire"][1] for a, _ in nohunt[5:]), "gear leaves it alone")
+        self.assertTrue(any(a["fire"][0] or a["fire"][1] for a, _ in hunt[5:]), "hunting, it is fought")
+
+    def test_hunt_not_while_hurt(self):
+        def make(w, t, k):
+            o = obs_at(w, t, hp=600, weapons=[weapon("gun"), weapon("laser")])
+            o["self"]["cubes"] = 4
+            return o
+        bot, _ = self.run_bot(5, make, {"gear": 1, "hunt": 1})
+        self.assertFalse(bot.tactics.cr.hunting)
+
+    def test_hunt_walks_to_a_remembered_mech(self):
+        def make(w, t, k):
+            o = obs_at(w, t, weapons=[weapon("gun"), weapon("laser")])
+            o["self"]["cubes"] = 4
+            if k < 3:
+                o["mechs"] = [enemy(9, ME[0] + 150.0, ME[1] + 60.0, w, math.pi / 2)]
+            return o
+        _, acts = self.run_bot(100, make, {"gear": 1, "hunt": 1})     # out of the 6 s fight memory after ~9 s
+        self.assertTrue(any(lab.startswith("cr hunt") for _, lab in acts[80:]), [lab for _, lab in acts[80:]])
+
     # ---------------------------------------------------------------- 2. energy
     def test_energy_never_boosts_to_loot(self):
         def make(w, t, k):

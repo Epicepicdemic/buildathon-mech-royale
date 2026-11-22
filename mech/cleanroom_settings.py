@@ -25,6 +25,15 @@ DEFAULTS = {
     "loot_mult": 1.0,       # loot walk radii x this (on top of the wide `far` radii)
     "chase_s": 22.0,        # an item chased this long without reaching it ...
     "chase_ban_s": 45.0,    # ... is dropped for this long
+    # --- 6. hunt: once geared and healthy, turn the gear and HP into kills
+    "hunt": 0,
+    "hunt_cubes": 3,        # geared: a laser and this many cubes ...
+    "hunt_cubes_alone": 8,  # ... or this many without a laser
+    "hunt_hp": 0.80,        # start hunting at or over this HP share ...
+    "hunt_stop_hp": 0.55,   # ... stop under this
+    "hunt_energy": 40.0,    # ... and start only with this much energy
+    "hunt_memory_s": 30.0,  # seek mechs seen this recently (and gunfire heard in the last 10 s)
+    "hunt_fight_bonus_m": 80.0,  # a mech busy fighting someone else counts as this much closer
     # --- 2. energy and noise: boost only for a reason
     "energy": 0,
     "silent": 0,            # idle travel under the step-sound speed (5 m/s), slack permitting
