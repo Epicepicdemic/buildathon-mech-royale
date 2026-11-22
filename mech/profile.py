@@ -32,6 +32,23 @@ modes. Pieces switched off here are kept for the next candidates (round table 12
                        squad mode its gun counts a quarter for 2.2 s in the fight calculation
                        (house experts reload in the open 92% of the time; in a free-for-all that
                        would close us into the 45-78 m band where top teams kill most)
+
+Aim branch (both modes; measured with analysis/mech/sim/shotlog.py, every shot's error at release):
+    accel_lead         the gun leads with the target's measured acceleration, speed-capped, and a
+                       braking target is predicted to stop rather than reverse
+    laser_aim          the laser aims one tick (0.05 s) ahead, from where our muzzle will be, at
+                       where the target will be (was 0.1 s ahead, from where the muzzle is)
+    clear_aim          the gun fires only when the line to the lead point (not to where the target
+                       is now) is clear; else it aims at the head or legs if those lines are clear
+    laser_hold         a charge whose target the decision dropped stays on that target's estimated
+                       position for 2 s and is released when it is back on and clear, instead of
+                       firing along the torso's facing
+    reengage           after a hit trade while the laser recovers (or the gun reloads), move 15-30 m
+                       to a cell hidden from everywhere the target stood in the last 5 s, then fight
+    gun_popup          jet-peek with the gun over low cover (8 m), cut the jets at the top and fall
+                       (no hover), only with 35 energy left after the climb
+
+Experiments only: MECH_PROFILE="name=0,other=1" overrides these in the sandbox.
 """
 import math
 import os
