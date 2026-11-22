@@ -169,6 +169,17 @@ Three are on:
   a clear line, with at least 40% of the charge. The charge used to fire along wherever the torso
   was facing. It does not hold while we retreat at full speed (charging halves our speed).
 
+Each of the three also has a squad-mode switch (`mech/profile.py`; a piece acts in squad mode only when
+both its own switch and its `_squad` switch are on, and in free-for-all mode on its own switch alone).
+In this commit:
+
+- `clear_aim_squad`: **on**
+- `laser_aim_squad`: **on**
+- `laser_hold_squad`: **off**. In squad mode a charge whose target the decision dropped fires along the
+  torso's facing, as before `laser_hold`. Sandbox, squad mode, 80 paired seeds against 57f8188: place
+  +0.70 ± 0.28 better, kills +0.54 ± 0.24 (measured with `laser_hold` off in both modes); the aim
+  builder's own 40-seed ablation agrees. Free-for-all play is unchanged (identical actions to 57f8188).
+
 Three are in the code but switched off, because they measured worse or no better (20 sandbox seeds
 per mode, each piece on alone, against 6e8634f):
 
