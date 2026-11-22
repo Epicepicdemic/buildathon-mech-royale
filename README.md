@@ -18,6 +18,7 @@ Line B (`Wilce-B`) of our `mechfight/1` bot for the Builders Buildathon Mech Roy
 | `mech/gunner.py`, `mech/ballistics.py` | Slew-aware gun aim, weave-damped leads, bursts, laser charge and release, lightning, mortar arcs. |
 | `mech/positions.py`, `mech/cover.py`, `mech/tactics.py`, `mech/mover.py`, `mech/brain.py` | Strongpoint selection, cover search, per-tick tactical arbitration, bullet/shell dodging, and time budget. |
 | `mech/profile.py` | Squad-practice profile: a mode detector from observation only (free-for-all by default and for good on any sign of one), squad-only gear-before-kill pacing (round table 12), the squad play choice with isolation from all but one shooter, sticky DPS/HP targeting, airborne aim, the damage pieces, and switches for each piece. |
+| `mech/cleanroom.py`, `mech/cleanroom_settings.py` | Clean-room pieces from our behaviour spec (gear first, energy, hide to heal, fight cells, home spot), each behind a switch. |
 | `tests/` | Unit tests, Line B regression tests (`test_line_b.py`), the 500-case route test and the recorded-stream replay. |
 | `tools/route_test.py`, `tools/kinesim.py` | Route test harness and the approximate movement model it drives. |
 
@@ -111,6 +112,36 @@ decisions, three squad matches, two free-for-alls) gives identical actions (`too
 A variant is `mech/squad_settings.json`, written and committed by `tools/variant.py key=value ...`. An
 unknown key or a wrong type stops the bot at start. Free-for-all play reads none of the knobs
 (`tests/test_switchboard.py`), and the mode detector's thresholds are not knobs.
+
+## Clean-room pieces (`mech/cleanroom.py`)
+
+Implemented clean-room from our behaviour spec (`analysis/mech/CLEANROOM-SPEC.md` in our private
+workspace, which describes behaviours and our own sandbox measurements only). No other team's code
+was read or used; every number was set by us. Each piece has its own switch: free-for-all mode (which
+is also every match's first 35 s, before the squad detector can decide) reads
+`mech/cleanroom_settings.py`, squad mode reads the same names with a `cr_` prefix from
+`mech/squad_settings.py`. All are off by default, so the default build plays exactly like f90bf0a
+(identical actions on recorded streams, `tools/replay_actions.py`). A variant sets them in
+`mech/cleanroom_settings.json` / `mech/squad_settings.json`.
+
+- `gear`: a mech is fought only when it is a real threat or an easy kill: within 60 m (70 m in
+  squad mode) in sight, it hit us in the last 4 s, it is charging a laser at us, it held its torso on
+  us for 1 s within 110 m, it is under 35% HP in sight within 130 m, or four or fewer mechs are
+  alive. Otherwise we loot with the wide radii, an item chased 22 s without reaching it is dropped
+  for 45 s, and a mech merely in sight does not stop looting or farming.
+- `energy`: boost only for a laser charge at us, a mortar shell, the zone, an isolation step, a
+  retreat while hit in the last 2 s, finishing a target, or bringing lightning into range; loot and
+  travel walk. `silent`: idle travel in a free-for-all walks under the 5 m/s step-sound speed.
+- `heal`: under 50% HP we retreat to the nearest cell hidden from every mech seen in the last 8 s
+  (30 s in squad mode) and from a point 70 m down the bearing of an unseen hit, and stand still
+  there until 92% HP (or 70% after 12 s with nothing seen or hitting us). No fire at drones or
+  crates under 50% HP; a drone that is hitting us is shot back; hit at the cell, we move.
+- `cells`: in range of the target with no corner ready, each 0.4 s pick the best of our cell and
+  eight cells 7 m out: preferred range for the loadout, in the target's sight only when a weapon is
+  ready (always in squad mode), out of other enemies' sight, clear of walls and lightning/mortar
+  holders, inside the zone, on a strafe side that flips every 1.2-3 s.
+- `home` (free-for-all only): the hold cell between fights is costed against every mech seen in the
+  last 45 s, keeps clear of announced supply-drop landings, and is kept 30 s.
 
 ## Build and check
 
