@@ -76,6 +76,9 @@ PROFILE = {
     "laser_hold": True,
     "reengage": False,
     "gun_popup": False,
+    "clear_aim_squad": True,    # each aim piece also in squad mode (off = free-for-all mode only)
+    "laser_aim_squad": True,
+    "laser_hold_squad": True,
 }
 
 SQUAD_AFTER_S = 35.0        # no squad decision before this. The first death came by 29.9 s in all 67

@@ -336,3 +336,29 @@ class LaserClearAimTests(unittest.TestCase):
         with Flag("clear_aim", False):
             _, _, _, info = Gunner(cfg, _WallWorld()).control(me, it, Target.from_track(tr, me.t))
         self.assertNotEqual(info.get("laser"), "release")
+
+
+class SquadSwitchTests(unittest.TestCase):
+    def test_squad_switch_turns_a_piece_off_in_squad_mode_only(self):
+        g = Gunner(config(), None)
+        with Flag("laser_hold", True), Flag("laser_hold_squad", False):
+            g.squad = False
+            self.assertTrue(g._on("laser_hold"))
+            g.squad = True
+            self.assertFalse(g._on("laser_hold"))
+        with Flag("laser_hold", False), Flag("laser_hold_squad", True):
+            g.squad = True
+            self.assertFalse(g._on("laser_hold"))
+
+    def test_clear_aim_off_in_squad_fires_into_the_wall_again(self):
+        cfg = config()
+        me = Me(self_obs(aim=(0.0, math.atan2(4.5 - 7.0, 100.0))), cfg)
+        tr = track(pos=(100.0, 0.0, 0.0))
+        it = Intent("assault", tr)
+        it.fire = "long"
+        g = Gunner(cfg, _WallWorld())
+        g.squad = True
+        with Flag("clear_aim", True), Flag("clear_aim_squad", False):
+            aim, fire, _, _ = g.control(me, it, Target.from_track(tr, me.t))
+        self.assertTrue(fire[0])
+        self.assertLess(aim[1], 0.0)
