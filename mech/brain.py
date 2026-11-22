@@ -20,8 +20,10 @@ from .cover import CoverState
 from .gunner import Gunner
 from .tactics import Tactics
 
-WORK_UNITS = 8000.0         # search work per decision (nav.WorkBudget units, about us of one worker CPU):
-                            # the same on any machine, so play does not depend on its speed
+WORK_UNITS = 6000.0         # search work per decision (nav.WorkBudget units, about us of one worker CPU):
+                            # the same on any machine, so play does not depend on its speed. Sized for a
+                            # 1-CPU container like CI's (about 1.3x slower than the worker): the old 9 ms
+                            # budget bought about 6,900 units there; fuzz worst case about 16 ms
 SAFETY_S = 0.030            # ... with a wall-clock stop this long after the decision began, a safety
                             # net for a machine several times slower than any we measured
 NAME = "Wilce-B"
