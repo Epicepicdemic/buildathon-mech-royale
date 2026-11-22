@@ -115,7 +115,9 @@ def load(path):
 
 
 PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "squad_settings.json")
-S = load(PATH) if os.path.exists(PATH) else dict(DEFAULTS)
+# the unit tests pin B2's behaviour, so they run on the defaults (tests/__init__.py sets this);
+# the variant file itself is still checked there (test_switchboard)
+S = load(PATH) if os.path.exists(PATH) and not os.environ.get("MECH_SQUAD_DEFAULTS") else dict(DEFAULTS)
 
 TRACE = False       # tests: record every read
 READS = []

@@ -68,7 +68,13 @@ class SwitchboardTests(unittest.TestCase):
               "facing_away_mult": 1.0, "boost_low": 8.0, "boost_resume": 40.0, "upgrade_order": []}
         for k, v in b2.items():
             self.assertEqual(SS.DEFAULTS[k], v, k)
-        self.assertFalse(os.path.exists(SS.PATH), "the default build carries no override file")
+        self.assertEqual(SS.S, SS.DEFAULTS)       # the tests run on the defaults (tests/__init__.py)
+
+    def test_the_variant_file_if_any_loads(self):
+        """A variant commit carries mech/squad_settings.json: it must pass the bot's own check."""
+        if os.path.exists(SS.PATH):
+            s = SS.load(SS.PATH)
+            self.assertTrue(set(s) == set(SS.DEFAULTS))
 
     def test_free_for_all_reads_no_knob(self):
         bot = Bot(hello(), world=world())
