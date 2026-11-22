@@ -99,7 +99,17 @@ DEFAULTS = {
     "upgrade_order": [],
 }
 
-FLAGS = {"isolate_on", "gear_on", "gear_need_laser", "finish_on"}                 # 0 or 1
+# --- the clean-room pieces (mech/cleanroom.py) in squad mode: the names of
+# mech/cleanroom_settings.py with a cr_ prefix, all off by default (B2)
+from . import cleanroom_settings as _CRS        # noqa: E402
+DEFAULTS.update({"cr_" + _k: _v for _k, _v in _CRS.DEFAULTS.items()})
+DEFAULTS.update({
+    "cr_engage_m": 70.0,        # squad: the hunters come to us anyway
+    "cr_loot_mult": 1.25,       # squad: a wider loot walk
+})
+
+FLAGS = {"isolate_on", "gear_on", "gear_need_laser", "finish_on"} \
+    | {"cr_" + _k for _k in ("gear", "energy", "silent", "heal", "cells", "home")}       # 0 or 1
 FRACS = {"lose_hp_two", "lose_hp_three", "lose_hp_alone", "finish_hp", "gear_defend_hp",
          "sticky_weak_hp", "npc_hp", "heal_hp", "heal_pressure_hp", "finish_target_hp",
          "finish_own_hp", "reload_discount"}                                     # shares in [0, 1]

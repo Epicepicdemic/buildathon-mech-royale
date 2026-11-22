@@ -18,6 +18,7 @@ from .cover import CoverState
 from .gunner import Target
 from .loot import LootMemory
 from . import profile as PF
+from . import cleanroom as CR
 from . import squad_settings as SS
 
 WANTED_WEAPONS = ("laser", "lightning")     # laser first (kills happen at range), lightning second, never mortar
@@ -147,6 +148,7 @@ class Tactics:
         self.displace = None         # ((x, y), until): moving off a spot a mortar may be falling on
         self.mortar_jink_until = -1e9
         self.spawn = None
+        self.cr = CR.State()         # the clean-room pieces (mech/cleanroom.py)
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -303,7 +305,8 @@ class Tactics:
 
         intent.fire = "none"
         dec.target = None
-        sc = self.shoot_choice(me, obs, allow_npc=True, squad=True) if slack > 10.0 else None
+        sc = self.shoot_choice(me, obs, allow_npc=True, squad=True) if slack > 10.0 \
+            and not CR.hold_fire(self, me, True) else None
         if sc is not None:
             dec.target = sc                           # crates and drones, never the hunter
             intent.fire = "long"
@@ -477,7 +480,7 @@ class Tactics:
         return self.patrol_yaw(me, None)
 
     # ------------------------------------------------------------------ aggressive loot & farming
-    def loot_choice(self, me, obs, far=False, allow=None, squad=False):
+    def loot_choice(self, me, obs, far=False, allow=None, squad=False, mult=1.0):
         """Best weapon pickup, kill drop, or cube from live sight + spatial LootMemory, inside safe zone.
         `far` (gear_first): a laser to 240 m, lightning to 160 m, cubes to 120 m; `allow(x, y)` vetoes
         goals (e.g. toward the hunter we keep at range)."""
@@ -519,6 +522,7 @@ class Tactics:
                     else SS.get("gear_lightning_m" if far else "loot_lightning_m")
             else:
                 max_d = (240.0 if k == "laser" else 160.0) if far else (145.0 if k == "laser" else 95.0)
+            max_d *= mult
             if d > max_d or abs(pp[2] - me.pos[2]) > 6.5 or not zone_ok(pp[0], pp[1]):
                 continue
             d_eff = d * (0.38 if k == "laser" else 0.72)
@@ -535,6 +539,7 @@ class Tactics:
                 max_d = SS.get("loot_killdrop_wanted_m" if has_wanted else "loot_killdrop_m") + (40.0 if far else 0.0)
             else:
                 max_d = (135.0 if has_wanted else 105.0) + (40.0 if far else 0.0)
+            max_d *= mult
             if d > max_d or abs(kp[2] - me.pos[2]) > 6.5 or not zone_ok(kp[0], kp[1]):
                 continue
             val = min(kcubes, 6) * 8.0 + (35.0 if has_wanted else 0.0)
@@ -550,6 +555,7 @@ class Tactics:
                 max_d = SS.get("gear_cube_m" if far else "loot_cube_m") if me.cubes < 10 else 55.0
             else:
                 max_d = (120.0 if far else 90.0) if me.cubes < 10 else 55.0
+            max_d *= mult
             if d > max_d or abs(cp[2] - me.pos[2]) > 4.0 or not zone_ok(cp[0], cp[1]):
                 continue
             # Cluster bonus when multiple cubes lie together (e.g. visible kill pile or drone drop)
@@ -657,9 +663,13 @@ class Tactics:
 
         self.mode.update(me, th, z)
         squad = self.mode.squad()
+        lt = self.laser_threat(me)
+        cr_gear = CR.on("gear", squad)
+        # clean-room gear: only a real threat or an easy kill is fought; the rest are left to loot past
+        fight = CR.threats(self, me, enemies, lt, squad) if cr_gear else enemies
         target, calc = D.pick_target(
             lambda e: self.situation(me, e, [o for o in enemies if o is not e], corner_ready),
-            enemies, t, me.xy, prev_id=self.prev_target_id, squad=squad,
+            fight, t, me.xy, prev_id=self.prev_target_id, squad=squad,
         )
         self.prev_target_id = target.id if target is not None else None
         others = [o for o in enemies if o is not target and
@@ -676,7 +686,12 @@ class Tactics:
             play = self._lose_rule(me, play, target, calc, enemies, sit, corner_ready)
         slack = self.mv.slack(me, z)
         dec.threat_yaw = self.danger_yaw(me)
-        lt = self.laser_threat(me)
+        cr_heal = CR.on("heal", squad)
+        if cr_heal:
+            CR.update_retreat(self, me, calc if target is not None else None, squad)
+            if self.cr.retreat and not squad and play in (D.CORNER, D.HARASS, D.ASSAULT) and calc is not None \
+                    and not calc.finishable and calc.ratio < 1.5:
+                play = D.BREAK
 
         # Zone pressure overrides lingering fights
         if slack < 4.0 and play in (D.CORNER, D.HARASS):
@@ -690,7 +705,7 @@ class Tactics:
             self.last_play = play
             self.play_since = t
 
-        alt_shoot = self._shootable(me, enemies)
+        alt_shoot = self._shootable(me, fight)
         ctx = {
             "calc": calc,
             "hide": self.cov.hide_xy(),
@@ -765,10 +780,14 @@ class Tactics:
             if intent.goal is not None:
                 far = math.hypot(intent.goal[0] - me.pos[0], intent.goal[1] - me.pos[1]) > 110.0
                 self.mv.go(intent.goal, me, z, prefer_cover=far, tag="assault", replan_dist=8.0)
+                dec.speed = intent.speed
+                dec.evasive = intent.evasive
             else:
                 self.mv.clear()
-            dec.speed = intent.speed
-            dec.evasive = intent.evasive
+                dec.speed = intent.speed
+                dec.evasive = intent.evasive
+                if CR.on("cells", squad) and target is not None and intent.spot == "strafe":
+                    CR.fight_cell(self, me, dec, target, others, ready, squad)
         elif play == D.CORNER:
             self.cov.want_hide(me, watchers, t, max_cost=65.0)
             if target is not None:
@@ -785,6 +804,9 @@ class Tactics:
                 self.mv.clear()
             dec.evasive = intent.goal is None or intent.spot == "peek"
             dec.speed = "walk"
+            if intent.goal is None and CR.on("cells", squad) and target is not None \
+                    and not (hx is not None and math.hypot(hx[0] - me.pos[0], hx[1] - me.pos[1]) <= 12.0):
+                CR.fight_cell(self, me, dec, target, others, ready, squad)
         elif play == D.HARASS:
             self.cov.want_hide(me, watchers, t, max_cost=45.0)
             if intent.goal is not None:
@@ -792,6 +814,9 @@ class Tactics:
             else:
                 self.mv.clear()
             dec.evasive = True
+        elif play == D.BREAK and cr_heal and self.cr.retreat and t - th.t_taken > 1.5 \
+                and not any(e.sees_us or e.los for e in enemies) and CR.hide_and_hold(self, me, dec, squad, slack):
+            pass
         elif play == D.BREAK:
             hide = self.cov.hide_xy()
             hit_now = t - th.t_taken <= 1.2
@@ -878,6 +903,8 @@ class Tactics:
         dec.label = intent.label if intent is not None else ""
         if self.loot_note and play == D.REPOSITION:
             dec.label += " " + self.loot_note
+        if CR.on("energy", squad):
+            CR.energy(self, me, dec, play, calc, lt, target, squad, slack)
         return dec
 
     @staticmethod
@@ -902,17 +929,33 @@ class Tactics:
         intent = dec.intent
         self.loot_note = ""
 
-        near_active = [tr for tr in self.th.active_mechs(t, 6.0) if self._dist(me, tr) < 75.0]
-        under_pressure = bool(near_active) or any(tr.sees_us for tr in self.th.mechs()) or (t - self.th.t_taken <= 3.5)
+        squad = self.mode.squad()
+        cr_gear = CR.on("gear", squad)
+        if CR.on("heal", squad) and CR.answer_drone(self, me, dec):
+            return
+        if CR.on("heal", squad) and self.cr.retreat and CR.hide_and_hold(self, me, dec, squad, slack):
+            return
+        if cr_gear:
+            # clean-room gear: only a real threat counts as pressure; a mech merely in sight does not
+            near_active = [tr for tr in self.cr.threats if self._dist(me, tr) < 75.0]
+            under_pressure = bool(self.cr.threats) or (t - self.th.t_taken <= 3.5)
+        else:
+            near_active = [tr for tr in self.th.active_mechs(t, 6.0) if self._dist(me, tr) < 75.0]
+            under_pressure = bool(near_active) or any(tr.sees_us for tr in self.th.mechs()) or (t - self.th.t_taken <= 3.5)
         # Immediately after a bruising fight with another shooter nearby (near sound or active contact),
         # duck out of sight to start regen before chasing distant ordinary cubes.
         close_sound = any(t - c.t <= 6.0 and c.band in ("near", "mid") for c in self.th.contacts)
         hurt_after_fight = (t - self.th.t_fight < 12.0) and (under_pressure or close_sound) and me.hp_frac < 0.65
 
         # 1. Weapons, kill drops, and cubes (walking & picking up items never interrupts HP regeneration!)
-        squad = self.mode.squad()
         if not under_pressure and slack > (SS.get("loot_slack_s") if squad else 13.0):
-            lc = self.loot_choice(me, obs, squad=squad)
+            if cr_gear:
+                lc = self.loot_choice(me, obs, far=True, allow=CR.loot_allow(self.cr, t), squad=squad,
+                                      mult=CR.get("loot_mult", squad))
+                if lc is not None:
+                    CR.note_chase(self.cr, t, lc[0], lc[1], lc[2], squad)
+            else:
+                lc = self.loot_choice(me, obs, squad=squad)
             if lc is not None:
                 kind, lid, pos, drop, in_reach = lc
                 d_loot = math.hypot(pos[0] - me.pos[0], pos[1] - me.pos[1])
@@ -949,9 +992,10 @@ class Tactics:
             return
 
         # 3. Farm crates & NPC drones aggressively while moving toward their drops!
-        enemy_within_135 = any(self._dist(me, tr) < 135.0 for tr in self.th.active_mechs(t, 8.0))
-        if not under_pressure and not enemy_within_135 and slack > 14.0:
-            allow_npc = not any(self._dist(me, tr) < 155.0 for tr in self.th.active_mechs(t, 8.0))
+        near_pool = self.cr.threats if cr_gear else self.th.active_mechs(t, 8.0)
+        enemy_within_135 = any(self._dist(me, tr) < 135.0 for tr in near_pool)
+        if not under_pressure and not enemy_within_135 and slack > 14.0 and not CR.hold_fire(self, me, squad):
+            allow_npc = not any(self._dist(me, tr) < 155.0 for tr in near_pool)
             sc = self.shoot_choice(me, obs, allow_npc=allow_npc, squad=squad)
             if sc is not None:
                 self.loot_note = "shoot %s" % sc.kind
