@@ -13,6 +13,72 @@ import heapq
 import math
 import time
 
+
+# ---------------------------------------------------------------- deterministic search budget
+# Cost of one unit of search work, in budget units (about microseconds of one worker CPU,
+# measured with analysis/mech/sim/reports/cr3/clockwork.py: zone-field pop 0.98 us, A* pop 2.7 us,
+# nearest-search check 22.7 us). The same work is done on a fast or a slow machine.
+ZONE_POP = 1.0
+ASTAR_POP = 2.8
+NEAREST_CHECK = 23.0
+
+
+class WorkBudget:
+    """One decision's search work: `units`, shared by the searches in order. A search given
+    `at(floor)` stops once the units left fall to its floor. `hard` (perf_counter seconds) is a
+    safety stop only, for a machine far slower than any we measured."""
+
+    def __init__(self, units, hard):
+        self.left = float(units)
+        self.hard = hard
+
+    def at(self, floor):
+        return _Slice(self, float(floor))
+
+
+class _Slice:
+    __slots__ = ("b", "floor")
+
+    def __init__(self, b, floor):
+        self.b, self.floor = b, floor
+
+    def spend(self, n):
+        self.b.left -= n
+
+    def out(self):
+        return self.b.left <= self.floor or time.perf_counter() > self.b.hard
+
+    def has(self):
+        return not self.out()
+
+    def raised(self, extra):
+        return _Slice(self.b, self.floor + extra)
+
+
+class _Clock:
+    """A plain perf_counter deadline (the old interface: tools and tests pass 1e18)."""
+    __slots__ = ("d",)
+
+    def __init__(self, d):
+        self.d = d
+
+    def spend(self, n):
+        pass
+
+    def out(self):
+        return time.perf_counter() > self.d
+
+    def has(self):
+        return not self.out()
+
+    def raised(self, extra):
+        return _Clock(self.d - extra * 1e-6)
+
+
+def as_slice(deadline):
+    return deadline if hasattr(deadline, "spend") else _Clock(deadline)
+
+
 INF = float("inf")
 
 
@@ -85,7 +151,7 @@ class ZoneField:
         edges = self.w.edges
         table = self.w.nbr_table
         pop, push = heapq.heappop, heapq.heappush
-        clock = time.perf_counter
+        sl = as_slice(deadline)
         count = 0
         ins = self.inside
         om = self.om
@@ -108,9 +174,11 @@ class ZoneField:
                         dist[m] = nd
                         push(heap, (nd, m))
             count += 1
-            if count & 255 == 0 and clock() > deadline:
-                self.pops += count
-                return False
+            if count & 255 == 0:
+                sl.spend(256 * ZONE_POP)
+                if sl.out():
+                    self.pops += count
+                    return False
         self.pops += count
         self.done = True
         return True
@@ -189,7 +257,7 @@ class AStar:
         gu, gv = self.gu, self.gv
         res = self.w.res
         pop, push = heapq.heappop, heapq.heappush
-        clock = time.perf_counter
+        sl = as_slice(deadline)
         count = 0
         stay = self.stay
         if stay is not None:
@@ -232,7 +300,8 @@ class AStar:
                     self.result = []
                     self.pops += count
                     return True
-                if clock() > deadline:
+                sl.spend(128 * ASTAR_POP)
+                if sl.out():
                     self.pops += count
                     return False
         self.result = []
@@ -272,7 +341,7 @@ class NearestSearch:
         table = self.w.nbr_table
         mult = self.mult
         pred = self.pred
-        clock = time.perf_counter
+        sl = as_slice(deadline)
         pop, push = heapq.heappop, heapq.heappush
         while heap:
             d, n = pop(heap)
@@ -293,8 +362,10 @@ class NearestSearch:
                         g[m] = nd
                         parent[m] = n
                         push(heap, (nd, m))
-            if (self.checked & 7) == 0 and clock() > deadline:
-                return False
+            if (self.checked & 7) == 0:
+                sl.spend(8 * NEAREST_CHECK)
+                if sl.out():
+                    return False
         return self._finish()
 
     def _finish(self):

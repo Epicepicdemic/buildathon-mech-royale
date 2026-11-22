@@ -46,7 +46,8 @@ class Mover:
 
     # ------------------------------------------------------------------ background work
     def work(self, me, zone, deadline):
-        """Advance the zone field and any route search until `deadline` (perf_counter)."""
+        """Advance the zone field and any route search within `deadline`: a nav.WorkBudget slice
+        (deterministic) or a perf_counter time."""
         key = (round(zone.next_center[0], 1), round(zone.next_center[1], 1), round(zone.next_radius, 1))
         if key != self.zf_key:
             self.zf_prev = self.zf if (self.zf is not None and self.zf.done) else self.zf_prev
@@ -54,12 +55,13 @@ class Mover:
             stay = (zone.center[0], zone.center[1], max(1.0, zone.radius - 4.0))
             self.zf = nav.ZoneField(self.w, zone.next_center[0], zone.next_center[1], r, stay=stay)
             self.zf_key = key
+        sl = nav.as_slice(deadline)
         if not self.zf.done:
-            zf_dl = deadline - 0.003 if self.planner is not None else deadline
-            if time.perf_counter() < zf_dl:
-                self.zf.run(zf_dl)
-        if self.planner is not None and time.perf_counter() < deadline:
-            if self.planner.run(deadline):
+            zf_sl = sl.raised(3000.0) if self.planner is not None else sl   # leave the planner its share
+            if zf_sl.has():
+                self.zf.run(zf_sl)
+        if self.planner is not None and sl.has():
+            if self.planner.run(sl):
                 res = self.planner.result
                 if res is not None:
                     self._set_route(res, self.plan_goal, self.plan_tag)

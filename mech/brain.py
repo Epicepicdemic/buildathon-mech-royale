@@ -1,7 +1,7 @@
-"""The bot: one decision per observation, inside a fixed time budget.
+"""The bot: one decision per observation, inside a fixed work budget.
 
 Per decision: parse, update threat memory and the zone, decide (tactics + doctrine), spend the
-remaining budget on searches (zone field, routes, cover), then steer the legs and the torso.
+a fixed number of search units (zone field, routes, cover; nav.WorkBudget, not the clock), then steer the legs and the torso.
 Long searches are resumable, so no decision waits for one to finish.
 """
 import gc
@@ -10,6 +10,7 @@ import random
 import sys
 import time
 
+from . import nav
 from .world import World
 from .zone import Zone
 from .threats import Threats
@@ -19,7 +20,10 @@ from .cover import CoverState
 from .gunner import Gunner
 from .tactics import Tactics
 
-WORK_BUDGET_S = 0.009       # searches stop after this much of the decision has passed
+WORK_UNITS = 8000.0         # search work per decision (nav.WorkBudget units, about us of one worker CPU):
+                            # the same on any machine, so play does not depend on its speed
+SAFETY_S = 0.030            # ... with a wall-clock stop this long after the decision began, a safety
+                            # net for a machine several times slower than any we measured
 NAME = "Wilce-B"
 
 
@@ -60,16 +64,16 @@ class Bot:
         self.mover.mob.update(me.stats)
         dec = self.tactics.decide(me, obs)
         # ---- background searches inside the budget
-        end = t0 + WORK_BUDGET_S
-        self.mover.work(me, self.zone, end - 0.0012)
-        self.cover.run(end - 0.0004)
+        budget = nav.WorkBudget(WORK_UNITS, t0 + SAFETY_S)
+        self.mover.work(me, self.zone, budget.at(1200))
+        self.cover.run(budget.at(400))
         if self.tactics.isolating:
-            self.tactics.iso.run(end - 0.0002)
+            self.tactics.iso.run(budget.at(200))
         if self.tactics.reengaging:
-            self.tactics.reeng.run(end - 0.0001)
+            self.tactics.reeng.run(budget.at(100))
         for srch in (self.tactics.opening_search, self.tactics.second_search):
-            if srch is not None and not srch.done and time.perf_counter() < end:
-                srch.run(end)
+            if srch is not None and not srch.done and budget.at(0).has():
+                srch.run(budget.at(0))
         # ---- legs: an air manoeuvre, a straight walk on a roof, or the mover
         laser = me.by_kind.get("laser")
         released = self.prev_charge > 0 and (laser is None or laser.charge == 0)
