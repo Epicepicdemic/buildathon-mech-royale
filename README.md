@@ -209,6 +209,12 @@ python3 check/check.py --map-dir /arena -- docker run --rm -i --network none --c
 Locally without Docker: `pip install numpy==2.3.5`, then `python3 tools/build_world.py arena worlddata/world.bin`,
 `python3 check/check.py -- python3 -u bot.py` and `python3 -m unittest discover -s tests -t .`.
 
+Timing tests and machine speed: the search budget is a fixed amount of work, so CPU time per decision follows the
+machine's speed. `tests/test_fuzz.py` therefore scales its 20 ms worst-decision target by `tests/speed.py`'s
+`speed_factor()` (this machine's time for a fixed line-of-sight and zone-field workload over the reference, one c7i
+worker CPU: 0.2145 s; never below 1), and keeps an absolute backstop: no decision over 35 ms of CPU on any machine,
+headroom under the match's 50 ms. This is a test-only change; play does not depend on it.
+
 ## Dependencies
 
 - Python 3.13.9 (the `python:3.13.9-slim` image). The bot itself uses only the standard library.
