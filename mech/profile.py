@@ -35,7 +35,8 @@ modes. Pieces switched off here are kept for the next candidates (round table 12
 
 Aim branch (both modes; measured with analysis/mech/sim/shotlog.py, every shot's error at release):
     accel_lead         the gun leads with the target's measured acceleration, speed-capped, and a
-                       braking target is predicted to stop rather than reverse
+                       braking target is predicted to stop rather than reverse. Off: no measured
+                       gain (unblocked hits on accelerating mechs 0.82 -> 0.78 squad, flat ffa)
     laser_aim          the laser aims one tick (0.05 s) ahead, from where our muzzle will be, at
                        where the target will be (was 0.1 s ahead, from where the muzzle is)
     clear_aim          the gun fires only when the line to the lead point (not to where the target
@@ -48,7 +49,8 @@ Aim branch (both modes; measured with analysis/mech/sim/shotlog.py, every shot's
                        Off: measured worse alone (squad place +1.60, free-for-all +0.85 on 20
                        seeds each; moving off the line costs gun hits and tempo)
     gun_popup          jet-peek with the gun over low cover (8 m), cut the jets at the top and fall
-                       (no hover), only with 35 energy left after the climb
+                       (no hover), only with 35 energy left after the climb. Off: free-for-all
+                       place +1.20 (1 better, 7 worse of 20), squad +0.90
 
 Experiments only: MECH_PROFILE="name=0,other=1" overrides these in the sandbox.
 """
@@ -68,12 +70,12 @@ PROFILE = {
     "house_aim": True,
     "mortar_priority": True,
     "punish_reload": True,
-    "accel_lead": True,
+    "accel_lead": False,
     "laser_aim": True,
     "clear_aim": True,
     "laser_hold": True,
     "reengage": False,
-    "gun_popup": True,
+    "gun_popup": False,
 }
 
 SQUAD_AFTER_S = 20.0        # no squad decision before this
