@@ -129,7 +129,8 @@ is also every match's first 35 s, before the squad detector can decide) reads
 
 **This commit switches on:** `gear`, `energy`, `silent` and `heal` in both modes (`silent` acts only in
 free-for-all mode), through `mech/cleanroom_settings.json` and `mech/squad_settings.json`; `cells` and `home` are
-off. It also carries the aim branch (`aim-sb`, below), merged on top. Sandbox numbers for this merge are in
+off. `hunt` is on in squad mode (`cr_hunt`): once geared (a laser and 3 cubes, or 8 cubes) with HP >= 80%
+and energy >= 40 the gear filter stands aside and we go find a kill, until HP falls under 55%. It also carries the aim branch (`aim-sb`, below), merged on top. Sandbox numbers for this merge are in
 our progress notes.
 
 - `gear`: a mech is fought only when it is a real threat or an easy kill: within 60 m (70 m in
