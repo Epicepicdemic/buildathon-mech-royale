@@ -64,7 +64,7 @@ class SwitchboardTests(unittest.TestCase):
               "want_laser_m": 85.0, "floor_lightning_m": D.HOUSE_LIGHTNING_M, "floor_mortar_m": D.HOUSE_MORTAR_M,
               "finish_on": 0, "finish_m": D.FINISH_M, "finish_target_hp": D.FINISH_TARGET_HP,
               "finish_own_hp": D.FINISH_OWN_HP, "sticky": D.STICKY, "sticky_weak": D.STICKY_WEAK,
-              "reload_s": D.RELOAD_S, "reload_discount": 0.25, "partial_frac": 0.7, "mortar_mult": 1.6,
+              "reload_s": D.RELOAD_S, "reload_discount": 0.25, "partial_frac": 0.7, "mortar_mult": None,
               "facing_away_mult": 1.0, "boost_low": 8.0, "boost_resume": 40.0, "upgrade_order": []}
         for k, v in b2.items():
             self.assertEqual(SS.DEFAULTS[k], v, k)
@@ -107,6 +107,37 @@ class SwitchboardTests(unittest.TestCase):
         bot = Bot(hello(), world=world())
         bot.tactics.mode.locked = True
         return bot
+
+    def test_mortar_weight_defaults_to_the_config_cookoff(self):
+        """B2 weighs a mortar holder by 1 + the config's laser cookoff; the switchboard's default is
+        that same rule (None), equal by construction, and a number overrides it."""
+        from mech.threats import Track
+        cfg = config()
+        e = Track(9, "mech", 100.0)
+        e.weapons = ["gun", "mortar"]
+        self.assertIsNone(SS.DEFAULTS["mortar_mult"])
+        self.assertEqual(D.cookoff_mult(e, cfg), 1.0 + cfg["weapons"]["laser"]["cookoff"])
+
+    def test_out_of_range_overrides_are_refused_at_import(self):
+        bad = [[0.4], {"lose_hp_two": float("nan")}, {"lose_hp_two": 1.5}, {"gear_on": 2},
+               {"dist_scale_m": 0}, {"score_hp_floor": -1}, {"lose_s": -0.5}, {"gear_kills": 1.5},
+               {"upgrade_order": ["armor", 3]}, {"upgrade_order": ["armor", "armor"]},
+               {"boost_low": 50.0}, {"want_gun_m": True}]
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "s.json")
+            for over in bad:
+                with open(p, "w") as f:
+                    f.write(json.dumps(over).replace("NaN", "NaN"))
+                with self.assertRaises((KeyError, TypeError, ValueError), msg=repr(over)):
+                    SS.load(p)
+            with open(p, "w") as f:
+                f.write('{"lose_s": Infinity}')
+            with self.assertRaises(ValueError):
+                SS.load(p)
+            with open(p, "w") as f:
+                json.dump({"mortar_mult": 2.0, "gear_on": 0, "upgrade_order": ["sensors", "armor"]}, f)
+            s = SS.load(p)
+            self.assertEqual((s["mortar_mult"], s["gear_on"]), (2.0, 0))
 
     def test_unknown_or_mistyped_overrides_are_refused(self):
         with tempfile.TemporaryDirectory() as d:

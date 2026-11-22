@@ -582,7 +582,7 @@ def pick_target(sit_factory, enemies, t, me_pos, prev_id=None, squad=False):
         if calc.finishable and visible:
             score *= w_fin
         if "laser" in sit.me_weapons:
-            if w_mort is None:
+            if w_mort is None:                         # B2's rule, from the config (both modes by default)
                 score *= cookoff_mult(e, sit.cfg)      # mortar_priority: our laser does x1.6 to it
             elif PF.on("mortar_priority") and getattr(e, "has", lambda k: False)("mortar"):
                 score *= w_mort

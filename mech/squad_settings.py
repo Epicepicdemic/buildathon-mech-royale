@@ -11,6 +11,7 @@ switches over the 1,072 seats of 67 recorded top-team free-for-alls) and must no
 against the practice board.
 """
 import json
+import math
 import os
 
 DEFAULTS = {
@@ -68,7 +69,8 @@ DEFAULTS = {
     "hit_us_mult": 1.3,         # whoever hit us in the last 2 s
     "finishable_mult": 2.1,     # one burst kills it
     "reload_mult": 1.4,         # heard reloading in the last reload_s
-    "mortar_mult": 1.6,         # holds a mortar (our laser cooks it off), when we hold a laser
+    "mortar_mult": None,        # holds a mortar, when we hold a laser: None = 1 + the config's laser
+                                # cookoff (B2's doctrine.cookoff_mult, +60% today); a number overrides
     "facing_away_mult": 1.0,    # its torso turned away from us (more than 90 degrees)
     "dist_scale_m": 250.0,      # score / (1 + distance / this)
     "reload_s": 2.2,            # a reload heard this recently is still going on
@@ -97,20 +99,62 @@ DEFAULTS = {
     "upgrade_order": [],
 }
 
+FLAGS = {"isolate_on", "gear_on", "gear_need_laser", "finish_on"}                 # 0 or 1
+FRACS = {"lose_hp_two", "lose_hp_three", "lose_hp_alone", "finish_hp", "gear_defend_hp",
+         "sticky_weak_hp", "npc_hp", "heal_hp", "heal_pressure_hp", "finish_target_hp",
+         "finish_own_hp", "reload_discount"}                                     # shares in [0, 1]
+COUNTS = {"gear_kills", "gear_cubes", "gear_cubes_alone"}                       # whole numbers >= 0
+DIVISORS = {"dist_scale_m", "score_hp_floor"}                                   # divided by: > 0
+OPTIONAL = {"mortar_mult"}                                                      # None or a number >= 0
+LISTS = {"upgrade_order"}                                                       # lists of upgrade ids
+
+
+def _reject_constant(c):
+    raise ValueError("squad settings: %s is not a finite number" % c)
+
+
+def check(name, v):
+    """Refuse a value the bot must not run with (raises at import, so a bad variant never plays)."""
+    def num(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    if name in LISTS:
+        if not isinstance(v, list) or not all(isinstance(x, str) and x for x in v) or len(set(v)) != len(v):
+            raise TypeError("squad setting %s: %r must be a list of distinct upgrade ids" % (name, v))
+        return
+    if name in OPTIONAL and v is None:
+        return
+    if not num(v):
+        raise TypeError("squad setting %s: %r is not a finite number" % (name, v))
+    if name in FLAGS and v not in (0, 1):
+        raise ValueError("squad setting %s: %r must be 0 or 1" % (name, v))
+    if name in FRACS and not 0.0 <= v <= 1.0:
+        raise ValueError("squad setting %s: %r must be within [0, 1]" % (name, v))
+    if name in COUNTS and (v < 0 or v != int(v)):
+        raise ValueError("squad setting %s: %r must be a whole number >= 0" % (name, v))
+    if name in DIVISORS and v <= 0:
+        raise ValueError("squad setting %s: %r must be > 0" % (name, v))
+    if v < 0:
+        raise ValueError("squad setting %s: %r must be >= 0" % (name, v))
+
+
 def load(path):
-    """DEFAULTS with the overrides in `path`; an unknown key or a wrong type stops the bot."""
+    """DEFAULTS with the overrides in `path`; anything the bot must not run with stops it at import:
+    a top level that is not an object, an unknown key, a wrong type, a value out of range (finite
+    numbers, flags 0/1, shares in [0, 1], whole counts, positive divisors, distinct upgrade ids),
+    or a boost reserve above its resume level."""
     with open(path) as f:
-        over = json.load(f)
+        over = json.load(f, parse_constant=_reject_constant)
+    if not isinstance(over, dict):
+        raise TypeError("squad settings: the top level must be an object, not %s" % type(over).__name__)
     bad = sorted(k for k in over if k not in DEFAULTS)
     if bad:
         raise KeyError("unknown squad settings: %s" % ", ".join(bad))
     for k, v in over.items():
-        d = DEFAULTS[k]
-        ok = isinstance(v, list) if isinstance(d, list) else (isinstance(v, (int, float)) and not isinstance(v, bool))
-        if not ok:
-            raise TypeError("squad setting %s: %r is not like its default %r" % (k, v, d))
+        check(k, v)
     s = dict(DEFAULTS)
     s.update(over)
+    if s["boost_low"] > s["boost_resume"]:
+        raise ValueError("squad settings: boost_low %r is above boost_resume %r" % (s["boost_low"], s["boost_resume"]))
     return s
 
 
