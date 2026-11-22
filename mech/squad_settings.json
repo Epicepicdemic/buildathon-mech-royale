@@ -1,0 +1,13 @@
+{
+ "assault_ratio": 4,
+ "corner_take": 2.5,
+ "even_ratio": 2.5,
+ "heal_hp": 0.95,
+ "heal_pressure_hp": 1.0,
+ "lose_hp_alone": 0.7,
+ "lose_hp_three": 1.0,
+ "lose_hp_two": 0.9,
+ "lose_s": 0.3,
+ "npc_hp": 0.9,
+ "their_dps_mult": 1.6
+}
