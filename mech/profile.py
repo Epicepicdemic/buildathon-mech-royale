@@ -34,6 +34,7 @@ modes. Pieces switched off here are kept for the next candidates (round table 12
                        would close us into the 45-78 m band where top teams kill most)
 """
 import math
+import os
 
 PROFILE = {
     "mode_detector": True,
@@ -48,6 +49,10 @@ PROFILE = {
     "house_aim": True,
     "mortar_priority": True,
     "punish_reload": True,
+    "accel_lead": True,
+    "laser_aim": True,
+    "clear_aim": True,
+    "laser_hold": True,
 }
 
 SQUAD_AFTER_S = 35.0        # no squad decision before this. The first death came by 29.9 s in all 67
@@ -57,6 +62,15 @@ CONVERGE_SPEED = 2.0        # a hunter closes on us faster than this (m/s) ...
 CONVERGE_M = 200.0          # ... from within this
 AIMED_RAD = 0.45            # ... or has its torso this close to us
 FIRE_EVIDENCE_S = 0.25      # fire between two other mechs seen this recently is evidence
+
+
+def _env_overrides():
+    """Sandbox experiments only: MECH_PROFILE="name=0,other=1" (the match container sets nothing)."""
+    for part in (os.environ.get("MECH_PROFILE") or "").split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            if k.strip() in PROFILE:
+                PROFILE[k.strip()] = v.strip() not in ("0", "false", "off", "")
 
 
 def on(name):
@@ -164,3 +178,6 @@ class ModeDetector:
             if tr.in_obs and _angdiff(tr.yaw, math.atan2(dy, dx)) < AIMED_RAD:
                 return True
         return False
+
+
+_env_overrides()
