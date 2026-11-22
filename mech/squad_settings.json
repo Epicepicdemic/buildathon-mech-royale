@@ -1,0 +1,9 @@
+{
+ "floor_lightning_m": 110,
+ "floor_mortar_m": 140,
+ "gear_max_m": 200,
+ "gear_min_m": 160,
+ "want_gun_m": 110,
+ "want_laser_m": 150,
+ "want_lightning_m": 60
+}
