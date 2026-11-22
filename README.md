@@ -188,6 +188,9 @@ container sets nothing.
 
 ## Search budget (`mech/nav.py` `WorkBudget`, `mech/brain.py`)
 
+**This build (`cr-detclock-57`) is 57f8188 plus this search budget and nothing else:** every switch and setting
+is 57f8188's (`laser_hold` stays on in both modes; there are no per-mode aim switches here).
+
 The background searches (zone field, A* routes, hide/peek/isolation cells) get a fixed amount of work
 per decision, 6,000 units (`WORK_UNITS`), not a slice of wall-clock time: a zone-field pop costs 1, an
 A* pop 2.8, a nearest-cell check 8 plus 0.08 per line-of-sight sample step it ran (counted by
