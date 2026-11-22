@@ -275,6 +275,15 @@ class Gunner:
                     gs = self._gun_aim(me, tgt, gun)
                     if angdiff(gs[0], yaw) <= GUN_LEAD_RAD and abs(gs[1] - pitch) <= GUN_LEAD_RAD:
                         gun_sol = gs
+                if PF.on("clear_aim") and self.w is not None and not self._clear_line(me, aimp):
+                    # the beam hits anywhere on the body: put it on the part the line reaches
+                    aim, ok = self._clear_part(me, tgt, aim, aimp)
+                    if ok:
+                        yaw, pitch = aim
+                        m = me.muzzle
+                        k = math.dist(m, aimp)
+                        aimp = (m[0] + math.cos(pitch) * math.cos(yaw) * k, m[1] + math.cos(pitch) * math.sin(yaw) * k,
+                                m[2] + math.sin(pitch) * k)
                 sy, sp = self._slewed(me, yaw, pitch, 0.05)
                 on = bal.on_target(sy, sp, yaw, pitch, cdist, tgt.radius, tgt.height / 2, 0.7)
                 clear = tgt.visible and self._clear_line(me, aimp)

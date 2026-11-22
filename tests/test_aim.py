@@ -318,3 +318,21 @@ class GunPopTests(unittest.TestCase):
         self.assertFalse(done)
         _, _, _, done = g.step(Me(self_obs(pos=(0.0, 0.0, 0.0), t=11.4), config()))
         self.assertTrue(done)
+
+
+class LaserClearAimTests(unittest.TestCase):
+    def test_laser_releases_on_the_head_over_a_low_wall(self):
+        cfg = config()
+        lw = weapon("laser", charge=0.75)
+        head_pitch = math.atan2(4.5 + 2.7 - 7.0, 100.0)
+        me = Me(self_obs(aim=(0.0, head_pitch), weapons=[weapon("gun"), lw]), cfg)
+        tr = track(pos=(100.0, 0.0, 0.0))
+        it = Intent("assault", tr)
+        it.fire = "long"
+        with Flag("clear_aim", True):
+            aim, fire, _, info = Gunner(cfg, _WallWorld()).control(me, it, Target.from_track(tr, me.t))
+        self.assertEqual(info.get("laser"), "release")
+        self.assertGreater(aim[1], 0.0)
+        with Flag("clear_aim", False):
+            _, _, _, info = Gunner(cfg, _WallWorld()).control(me, it, Target.from_track(tr, me.t))
+        self.assertNotEqual(info.get("laser"), "release")
