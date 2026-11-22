@@ -16,11 +16,14 @@ import time
 
 # ---------------------------------------------------------------- deterministic search budget
 # Cost of one unit of search work, in budget units (about microseconds of one worker CPU,
-# measured with analysis/mech/sim/reports/cr3/clockwork.py: zone-field pop 0.98 us, A* pop 2.7 us,
-# nearest-search check 22.7 us). The same work is done on a fast or a slow machine.
+# measured with analysis/mech/sim/reports/cr3/clockwork.py and loscost.py: zone-field pop 0.98 us,
+# A* pop 2.7 us, a nearest-search check 8 us plus its line of sight). The same work is done on a fast
+# or a slow machine.
 ZONE_POP = 1.0
 ASTAR_POP = 2.8
-NEAREST_CHECK = 23.0
+NEAREST_CHECK = 8.0         # a nearest-search check without its line-of-sight work ...
+LOS_STEP = 0.08             # ... plus this per line-of-sight sample step it ran (World.los_steps; a hide
+                            # check costs 2.0 + 0.078 us per step on one worker CPU: cr3/loscost.py)
 
 
 class WorkBudget:
@@ -342,6 +345,8 @@ class NearestSearch:
         mult = self.mult
         pred = self.pred
         sl = as_slice(deadline)
+        w = self.w
+        los0 = w.los_steps
         pop, push = heapq.heappop, heapq.heappush
         while heap:
             d, n = pop(heap)
@@ -363,7 +368,9 @@ class NearestSearch:
                         parent[m] = n
                         push(heap, (nd, m))
             if (self.checked & 7) == 0:
-                sl.spend(8 * NEAREST_CHECK)
+                los1 = w.los_steps
+                sl.spend(8 * NEAREST_CHECK + (los1 - los0) * LOS_STEP)
+                los0 = los1
                 if sl.out():
                     return False
         return self._finish()

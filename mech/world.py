@@ -20,6 +20,7 @@ CANOPY_BLOCK_M = 4.0       # metres of crown along a sight line that hide a mech
 
 class World:
     def __init__(self, path=DEFAULT_PATH):
+        self.los_steps = 0      # sample steps of every line_clear call so far (deterministic work count)
         with open(path, "rb") as f:
             if f.read(4) != b"MRW2":
                 raise ValueError("not a world file")
@@ -188,6 +189,7 @@ class World:
         sd = self.sight_dm
         k0 = max(1, int(math.ceil(skip_end / L * n)))
         k1 = n - k0
+        self.los_steps += k1 - k0 + 1          # line-of-sight work done (nav.WorkBudget counts it)
         can = 0.0
         seg = L / n
         nu = self.nu
