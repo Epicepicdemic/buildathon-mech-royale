@@ -44,7 +44,9 @@ Aim branch (both modes; measured with analysis/mech/sim/shotlog.py, every shot's
                        position for 2 s and is released when it is back on and clear, instead of
                        firing along the torso's facing
     reengage           after a hit trade while the laser recovers (or the gun reloads), move 15-30 m
-                       to a cell hidden from everywhere the target stood in the last 5 s, then fight
+                       to a cell hidden from everywhere the target stood in the last 5 s, then fight.
+                       Off: measured worse alone (squad place +1.60, free-for-all +0.85 on 20
+                       seeds each; moving off the line costs gun hits and tempo)
     gun_popup          jet-peek with the gun over low cover (8 m), cut the jets at the top and fall
                        (no hover), only with 35 energy left after the climb
 
@@ -70,7 +72,7 @@ PROFILE = {
     "laser_aim": True,
     "clear_aim": True,
     "laser_hold": True,
-    "reengage": True,
+    "reengage": False,
     "gun_popup": True,
 }
 
