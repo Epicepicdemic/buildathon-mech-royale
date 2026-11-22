@@ -3,7 +3,7 @@
 The bot's search budget is a fixed amount of work (mech/nav.py WorkBudget), so its CPU time per decision
 follows the machine's speed. Timing tests scale their limits by `speed_factor()`: this machine's time for
 a fixed workload (line-of-sight segments and a small zone-field search, the bot's two main costs) over
-the same workload's time on the reference machine, one CPU of our c7i worker; never below 1.0. The
+the same workload's time on the reference machine (an Apple M-series laptop); never below 1.0. The
 minimum of several repetitions is used, so a briefly busy machine does not inflate it.
 """
 import math
@@ -12,8 +12,10 @@ import time
 
 from mech import nav
 
-REF_BENCH_S = 0.2145        # seconds for bench() on one c7i worker CPU, its hyperthread sibling running a sandbox
-                            # match (measured 2026-11-22: 0.2145-0.2153 s; an Apple M-series laptop takes 0.059 s)
+REF_BENCH_S = 0.059         # seconds for bench() on the reference machine, an Apple M-series laptop (2026-11-22:
+                            # 0.0591-0.0605 s; its fuzz worst decision 7-10 ms). Measured elsewhere: one c7i worker
+                            # CPU with its hyperthread sibling busy 0.2145 s. A slower machine gets a proportionally
+                            # higher timing limit; tests also keep an absolute backstop.
 
 
 def bench(w, reps=7):
@@ -37,5 +39,7 @@ def bench(w, reps=7):
 
 
 def speed_factor(w):
-    """How many times slower than the reference machine this one is (1.0 when as fast or faster)."""
-    return max(1.0, bench(w) / REF_BENCH_S)
+    """(factor, bench seconds): how many times slower than the reference machine this one is (1.0 when as
+    fast or faster), and this machine's bench() time."""
+    b = bench(w)
+    return max(1.0, b / REF_BENCH_S), b

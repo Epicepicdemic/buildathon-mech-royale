@@ -146,11 +146,11 @@ class FuzzTests(unittest.TestCase):
         self.assertEqual(decisions, 2400)
         cpu.sort()
         # the search budget is fixed work, so CPU time follows this machine's speed: the 20 ms target holds on
-        # a machine as fast as one c7i worker CPU and scales up on slower ones (tests/speed.py) ...
-        factor = speed_factor(w)
+        # a machine as fast as the reference laptop and scales up on slower ones (tests/speed.py) ...
+        factor, bench_s = speed_factor(w)
         limit = 20.0 * factor
-        print("\nfuzz: %d decisions, cpu p50 %.1f p99 %.1f worst %.1f ms (speed factor %.2f, limit %.1f ms, backstop 35 ms)"
-              % (len(cpu), cpu[len(cpu) // 2], cpu[int(len(cpu) * 0.99)], cpu[-1], factor, limit))
+        print("\nfuzz: %d decisions, cpu p50 %.1f p99 %.1f worst %.1f ms (bench %.4f s, speed factor %.2f, limit %.1f ms,"
+              " backstop 35 ms)" % (len(cpu), cpu[len(cpu) // 2], cpu[int(len(cpu) * 0.99)], cpu[-1], bench_s, factor, limit))
         # every zone change and dozens of entities each tick: still inside the scaled 20 ms target ...
         self.assertLess(cpu[-1], limit)
         # ... and never a decision over 35 ms of CPU on any machine (headroom under the match's 50 ms)
