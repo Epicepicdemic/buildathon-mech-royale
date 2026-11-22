@@ -1,0 +1,6 @@
+{
+ "lose_hp_alone": 0.2,
+ "lose_hp_three": 0.6,
+ "lose_hp_two": 0.35,
+ "lose_s": 4.0
+}
