@@ -52,15 +52,25 @@ def drive(n, mechs_fn=lambda k: [], t0=0.0, step=0.1, extra=None, bot=None):
 
 
 class DetectorTests(unittest.TestCase):
-    def test_squad_after_20_s_with_a_hunter_converging(self):
-        bot, labels = drive(40, lambda k: [hunter(world(), k)], t0=18.0)
+    def test_squad_after_35_s_with_a_hunter_converging(self):
+        bot, labels = drive(40, lambda k: [hunter(world(), k)], t0=33.0)
         self.assertEqual(bot.tactics.mode.mode, "squad")
         self.assertTrue(any(l.startswith("S ") for l in labels))
-        self.assertGreaterEqual(bot.tactics.mode.t_squad, 20.0)
+        self.assertGreaterEqual(bot.tactics.mode.t_squad, 35.0)
 
-    def test_not_before_20_s(self):
-        bot, labels = drive(30, lambda k: [hunter(world(), k)], t0=5.0)
+    def test_not_before_35_s(self):
+        bot, labels = drive(30, lambda k: [hunter(world(), k)], t0=21.0)
         self.assertEqual(bot.tactics.mode.mode, "ffa")
+
+    def test_no_squad_after_a_death_we_did_not_cause_even_after_the_shrink(self):
+        """Replayed top-team free-for-all: a seat that made every early kill itself was hunted at
+        67.7 s; a death it did not cause had come at 65 s (after the shrink, so not evidence)."""
+        def extra(obs, k):
+            obs["alive"] = 16 if k < 2 else 15
+        bot, labels = drive(40, lambda k: [hunter(world(), k)] if k >= 4 else [], t0=64.0, extra=extra)
+        self.assertEqual(bot.tactics.mode.mode, "ffa")
+        self.assertFalse(bot.tactics.mode.locked)          # not evidence of a free-for-all either
+        self.assertFalse(any(l.startswith("S ") for l in labels))
 
     def test_counter_a_quiet_opening_with_nobody_coming_stays_ffa(self):
         """The standing rule's counter: a quiet free-for-all opening must not trip it."""
@@ -92,7 +102,7 @@ class DetectorTests(unittest.TestCase):
             obs["alive"] = 16 if k < 3 else 15
             if k == 3:
                 obs["events"] = [{"type": "kill", "target": 77}]
-        bot, labels = drive(40, lambda k: [hunter(world(), k)], t0=18.0, extra=extra)
+        bot, labels = drive(40, lambda k: [hunter(world(), k)], t0=33.0, extra=extra)
         self.assertFalse(bot.tactics.mode.locked)
         self.assertEqual(bot.tactics.mode.mode, "squad")
 
@@ -108,7 +118,7 @@ class DetectorTests(unittest.TestCase):
 
         def extra(obs, k):
             obs["events"] = [{"type": "hit", "target": 9, "amount": 45, "weapon": "gun"}]
-        bot, labels = drive(40, mechs, t0=18.0, extra=extra)
+        bot, labels = drive(40, mechs, t0=33.0, extra=extra)
         self.assertFalse(bot.tactics.mode.locked, bot.tactics.mode.why)
         self.assertEqual(bot.tactics.mode.mode, "squad")
 
@@ -142,12 +152,12 @@ class DetectorTests(unittest.TestCase):
         def extra(obs, k):
             obs["projectiles"] = [{"id": 900 + k, "kind": "gun", "pos": [a[0], a[1] - 10.0, 8.0], "vel": [0.0, -250.0, 0.0]}]
         mechs = lambda k: [enemy(8, a[0], a[1], w, -math.pi / 2), enemy(10, b[0], b[1], w, 0.0), hunter(w, k)]
-        bot, labels = drive(40, mechs, t0=18.0, extra=extra)
+        bot, labels = drive(40, mechs, t0=33.0, extra=extra)
         self.assertFalse(bot.tactics.mode.locked, bot.tactics.mode.why)
 
     def test_off_switch_means_always_ffa(self):
         with switch("mode_detector", False):
-            bot, labels = drive(40, lambda k: [hunter(world(), k)], t0=18.0)
+            bot, labels = drive(40, lambda k: [hunter(world(), k)], t0=33.0)
             self.assertFalse(bot.tactics.mode.squad())
 
 
@@ -334,8 +344,8 @@ class GearFirstTests(unittest.TestCase):
         bot, labels, _ = self.run_gear(45.0)
         self.assertFalse(any("gear" in l for l in labels[11:]), labels)
 
-    def test_ends_for_good_at_50_s(self):
-        bot, labels, _ = self.run_gear(130.0, t0=49.75, n=6)
+    def test_ends_for_good_at_65_s(self):
+        bot, labels, _ = self.run_gear(130.0, t0=64.75, n=6)
         self.assertTrue(any("gear" in l for l in labels[:3]), labels)
         self.assertFalse(any("gear" in l for l in labels[3:]), labels)
         self.assertTrue(bot.tactics.gear_done)

@@ -26,7 +26,9 @@ PROFILE = {
     "finish_close": False,
 }
 
-SQUAD_AFTER_S = 20.0        # no squad decision before this
+SQUAD_AFTER_S = 35.0        # no squad decision before this. The first death came by 29.9 s in all 67
+                            # recorded top-team free-for-alls (recon/replays/measurements.json); with
+                            # 20 s, 180 of their 1,072 seats switched to squad mode before it
 CONVERGE_SPEED = 2.0        # a hunter closes on us faster than this (m/s) ...
 CONVERGE_M = 200.0          # ... from within this
 AIMED_RAD = 0.45            # ... or has its torso this close to us
@@ -51,7 +53,8 @@ class ModeDetector:
       - another mech losing HP not to us (checked after the tick's hit events) while inside the zone,
         with no drone within 60 m, and another mech in view with its torso on it that fired within 1 s;
       - a death we did not cause before the first phase's shrink starts (after that it may be the zone).
-    Squad: from 20 s on, no such evidence, and a hunter converging on us (it hit us, it closes on
+    Squad: from 35 s on, no such evidence, no death we did not cause seen at any time, and a hunter
+    converging on us (it hit us, it closes on
     us faster than 2 m/s within 200 m, or its torso is on us). A quiet free-for-all opening with
     nobody coming for us therefore stays free-for-all; and any later evidence switches back for
     good (counter: treat anything unclear as a free-for-all).
@@ -78,7 +81,10 @@ class ModeDetector:
             self.mode = "ffa"
             self.why = (round(t, 1), why)
             return
-        if self.mode == "ffa" and t >= SQUAD_AFTER_S and self._converging(me, th):
+        if self.mode == "ffa" and t >= SQUAD_AFTER_S and self.seen_uncredited == 0 and self._converging(me, th):
+            # (after the first shrink a death we did not cause is no proof, since the zone kills too, but
+            # it is no squad sign either: one replayed top-team seat killed every mech that died
+            # before 60 s itself and was hunted at 67.7 s)
             self.mode = "squad"
             self.t_squad = t
 

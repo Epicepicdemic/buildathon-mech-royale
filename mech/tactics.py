@@ -21,7 +21,8 @@ from . import profile as PF
 WANTED_WEAPONS = ("laser", "lightning")     # laser first (kills happen at range), lightning second, never mortar
 LOSE_S = 1.5            # squad_no_break: clearly losing this long before a break stands
 LOSE_NEAR_M = 160.0     # ... counting mechs this close
-GEAR_UNTIL_S = 50.0     # gear_first (mech/profile.py): the opening pacing ends at this time ...
+GEAR_UNTIL_S = 65.0     # gear_first (mech/profile.py): the opening pacing ends at this time (30 s
+                        # after the earliest squad decision, mech/profile.py SQUAD_AFTER_S) ...
 GEAR_KILLS = 1          # ... or after more kills than this
 GEAR_NEAR_M = 180.0     # a second mech this close: fight (pacing stands aside meanwhile)
 GEAR_MIN_M = 120.0      # keep the lone hunter at least this far ...
